@@ -52,3 +52,5 @@ Thumbs.db
 
 # Project specific data files
 candidates*.csv
+exa-results.json
+debug/

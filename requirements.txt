@@ -4,3 +4,7 @@ pandas
 python-dotenv
 requests
 tqdm
+fastapi
+uvicorn
+redis
+rq
