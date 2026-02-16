@@ -62,12 +62,17 @@ If channel is private, also add:
 4. Deploy.
 
 Then deploy worker separately (Railway/Render/Fly/ECS/etc.) with same env vars plus `REDIS_URL`.
+For Railway, this repo includes `nixpacks.toml` so build installs dependencies and start runs `python -u worker.py`.
 
 ## Worker Run Command
 
 ```bash
 python worker.py
 ```
+
+Railway expected commands:
+- Build: `pip install -r requirements.txt` (or leave default with `nixpacks.toml`)
+- Start: `python -u worker.py`
 
 For one-shot processing (CI/manual):
 

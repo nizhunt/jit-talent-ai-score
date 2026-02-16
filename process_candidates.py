@@ -187,7 +187,7 @@ def generate_exa_queries(
     jd_text: str,
     exa_query_prompt_template: str,
     model: str,
-) -> List[str]:
+) -> Tuple[List[str], Dict[str, int]]:
     prompt = (
         f"{exa_query_prompt_template.strip()}\\n\\n"
         "Job description:\\n"
@@ -214,7 +214,8 @@ def generate_exa_queries(
     if len(queries) != 15:
         raise RuntimeError(f"Expected 15 queries, got {len(queries)}")
 
-    return queries
+    usage = extract_usage_tokens(response)
+    return queries, usage
 
 
 def save_debug_queries(debug: bool, debug_dir: str, queries: List[str]) -> Optional[str]:
@@ -497,9 +498,9 @@ def get_ai_score(
     jd_text: str,
     scorer_prompt_template: str,
     model: str,
-) -> Tuple[Any, str]:
+) -> Tuple[Any, str, Dict[str, int]]:
     if not candidate_text or pd.isna(candidate_text):
-        return 0, "No candidate data available"
+        return 0, "No candidate data available", {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
 
     scorer_prompt = scorer_prompt_template.replace("[PASTE LINKEDIN DATA]", str(candidate_text))
     scorer_prompt = scorer_prompt.replace("[PASTE JD TEXT]", jd_text)
@@ -522,10 +523,25 @@ def get_ai_score(
         )
         raw = (response.choices[0].message.content or "").strip()
         data = json.loads(raw)
-        return int(data["score"]), data["reason"]
+        return int(data["score"]), data["reason"], extract_usage_tokens(response)
     except Exception as exc:
         print(f"  [warn] scoring error: {exc}")
-        return "Error", str(exc)
+        return "Error", str(exc), {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+
+
+def extract_usage_tokens(response: Any) -> Dict[str, int]:
+    usage = getattr(response, "usage", None)
+    if usage is None:
+        return {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+
+    input_tokens = int(getattr(usage, "prompt_tokens", 0) or 0)
+    output_tokens = int(getattr(usage, "completion_tokens", 0) or 0)
+    total_tokens = int(getattr(usage, "total_tokens", input_tokens + output_tokens) or (input_tokens + output_tokens))
+    return {
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "total_tokens": total_tokens,
+    }
 
 
 def score_candidates_csv(
@@ -538,7 +554,7 @@ def score_candidates_csv(
     progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
     notify_every: int = 50,
     initial_seconds_per_candidate: float = 2.5,
-) -> pd.DataFrame:
+) -> Tuple[pd.DataFrame, Dict[str, int]]:
     df = pd.read_csv(input_csv)
     if "ai-score" not in df.columns:
         df["ai-score"] = None
@@ -560,6 +576,7 @@ def score_candidates_csv(
 
     progress = tqdm(total=pending_count, desc="Scoring", unit="candidate")
     started_at = time.monotonic()
+    usage_totals = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
 
     for idx in df.index:
         if not pending[idx]:
@@ -569,13 +586,16 @@ def score_candidates_csv(
         if not text and "raw_json" in df.columns:
             text = normalize_whitespace(df.at[idx, "raw_json"])
 
-        score, reason = get_ai_score(
+        score, reason, usage = get_ai_score(
             client=client,
             candidate_text=text,
             jd_text=jd_text,
             scorer_prompt_template=scorer_prompt_template,
             model=model,
         )
+        usage_totals["input_tokens"] += int(usage.get("input_tokens", 0))
+        usage_totals["output_tokens"] += int(usage.get("output_tokens", 0))
+        usage_totals["total_tokens"] += int(usage.get("total_tokens", 0))
 
         df.at[idx, "ai-score"] = score
         df.at[idx, "ai-reason"] = reason
@@ -608,7 +628,42 @@ def score_candidates_csv(
     progress.close()
     df = reorder_columns(df, SCORED_CSV_FIRST_COLUMNS)
     df.to_csv(output_csv, index=False)
-    return df
+    return df, usage_totals
+
+
+def compute_cost_summary(
+    *,
+    exa_request_count: int,
+    exa_pages_count: int,
+    openai_input_tokens: int,
+    openai_output_tokens: int,
+    scored_count: int,
+    used_assumptions: bool,
+) -> Dict[str, Any]:
+    exa_search_per_1000 = float(os.getenv("EXA_SEARCH_COST_PER_1000_REQUESTS", "25"))
+    exa_text_per_1000 = float(os.getenv("EXA_TEXT_COST_PER_1000_PAGES", "1"))
+    openai_input_per_1m = float(os.getenv("OPENAI_INPUT_COST_PER_1M_TOKENS", "0.15"))
+    openai_output_per_1m = float(os.getenv("OPENAI_OUTPUT_COST_PER_1M_TOKENS", "0.60"))
+
+    exa_search_cost = (exa_request_count / 1000.0) * exa_search_per_1000
+    exa_text_cost = (exa_pages_count / 1000.0) * exa_text_per_1000
+    exa_total = exa_search_cost + exa_text_cost
+
+    openai_input_cost = (openai_input_tokens / 1_000_000.0) * openai_input_per_1m
+    openai_output_cost = (openai_output_tokens / 1_000_000.0) * openai_output_per_1m
+    openai_total = openai_input_cost + openai_output_cost
+
+    total_cost = exa_total + openai_total
+    divisor = max(1, scored_count)
+    per_scored = total_cost / divisor
+
+    return {
+        "exa_total": exa_total,
+        "openai_total": openai_total,
+        "total_cost": total_cost,
+        "per_scored_candidate": per_scored,
+        "used_assumptions": used_assumptions,
+    }
 
 
 def upload_file_to_slack(
@@ -753,14 +808,9 @@ def run_pipeline_from_jd_text(
 
     write_text_file(args.jd_path, jd_text)
     print(f"Wrote JD text to {args.jd_path}")
-    post_pipeline_update(
-        slack_token=slack_token,
-        channel_id=args.channel_id,
-        text="Started processing the JD.",
-    )
 
     debug_pause(args.debug, "generate_queries")
-    queries = generate_exa_queries(
+    queries, query_generation_usage = generate_exa_queries(
         client=client,
         jd_text=jd_text,
         exa_query_prompt_template=exa_query_prompt_template,
@@ -810,11 +860,6 @@ def run_pipeline_from_jd_text(
     rows = flatten_exa_results_to_rows(consolidated.get("results", []))
     csv_df = write_results_csv(args.candidates_csv, rows)
     print(f"Wrote {len(csv_df)} rows to {args.candidates_csv}")
-    post_pipeline_update(
-        slack_token=slack_token,
-        channel_id=args.channel_id,
-        text=f"Consolidated CSV created with {len(csv_df)} rows.",
-    )
     maybe_stop(args.stop_after, "csv")
 
     debug_pause(args.debug, "dedup")
@@ -859,7 +904,7 @@ def run_pipeline_from_jd_text(
                 ),
             )
 
-    scored_df = score_candidates_csv(
+    scored_df, scoring_usage = score_candidates_csv(
         client=client,
         input_csv=args.dedup_csv,
         output_csv=args.scored_csv,
@@ -887,10 +932,32 @@ def run_pipeline_from_jd_text(
     )
     file_id = (slack_upload.get("file") or {}).get("id")
     print(f"Uploaded scored CSV to Slack channel {args.channel_id}. file_id={file_id}")
+
+    total_input_tokens = int(query_generation_usage.get("input_tokens", 0)) + int(scoring_usage.get("input_tokens", 0))
+    total_output_tokens = int(query_generation_usage.get("output_tokens", 0)) + int(scoring_usage.get("output_tokens", 0))
+    used_assumptions = False
+    if total_input_tokens == 0 and total_output_tokens == 0:
+        used_assumptions = True
+        estimated_candidates = max(1, len(scored_df))
+        total_input_tokens = 2000 + (estimated_candidates * 2000)
+        total_output_tokens = 3500 + (estimated_candidates * 120)
+
+    cost_summary = compute_cost_summary(
+        exa_request_count=len(queries),
+        exa_pages_count=int(consolidated.get("total_results") or 0),
+        openai_input_tokens=total_input_tokens,
+        openai_output_tokens=total_output_tokens,
+        scored_count=len(scored_df),
+        used_assumptions=used_assumptions,
+    )
+
     post_pipeline_update(
         slack_token=slack_token,
         channel_id=args.channel_id,
-        text="Pipeline complete. Scored CSV uploaded.",
+        text=(
+            f"Estimated cost per scored candidate: ${cost_summary['per_scored_candidate']:.4f} "
+            f"(Exa + OpenAI{', using assumptions' if cost_summary['used_assumptions'] else ', using actual usage'})."
+        ),
     )
     maybe_stop(args.stop_after, "post")
 
@@ -902,6 +969,7 @@ def run_pipeline_from_jd_text(
         "rows_scored": int(len(scored_df)),
         "uploaded_file_id": file_id,
         "debug_queries_log": debug_log_path,
+        "cost_summary": cost_summary,
     }
 
 
