@@ -58,19 +58,23 @@ async def health() -> JSONResponse:
 
 @app.post("/slack/events")
 async def slack_events(request: Request):
-    signing_secret = require_env("SLACK_SIGNING_SECRET")
     expected_channel_id = os.getenv("SLACK_CHANNEL_ID", CHANNEL_ID_DEFAULT)
-
     body = await request.body()
+
+    try:
+        payload = await request.json()
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"invalid_json: {exc}") from exc
+
+    request_type = payload.get("type")
+    if request_type == "url_verification":
+        return PlainTextResponse(payload.get("challenge", ""))
+
+    signing_secret = require_env("SLACK_SIGNING_SECRET")
     signature = request.headers.get("X-Slack-Signature", "")
     timestamp = request.headers.get("X-Slack-Request-Timestamp", "")
     if not verify_slack_signature(signing_secret, timestamp, signature, body):
         raise HTTPException(status_code=401, detail="invalid_signature")
-
-    payload = await request.json()
-    request_type = payload.get("type")
-    if request_type == "url_verification":
-        return PlainTextResponse(payload.get("challenge", ""))
 
     if request_type != "event_callback":
         return JSONResponse({"ok": True, "ignored": "unsupported_type"})
