@@ -2,9 +2,15 @@
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "fluid": true,
   "functions": {
-    "app.py": {
+    "api/index.py": {
       "maxDuration": 300,
       "excludeFiles": "{venv/**,__pycache__/**,*.csv,exa-results.json,debug/**}"
     }
-  }
+  },
+  "routes": [
+    {
+      "src": "/(.*)",
+      "dest": "api/index.py"
+    }
+  ]
 }

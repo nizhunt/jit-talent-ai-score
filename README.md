@@ -9,6 +9,7 @@ Slack `# JD` ingestion + Exa sourcing + AI scoring pipeline.
   - filters channel + `# JD` format
   - enqueues job to Redis/RQ
   - returns fast `200` to Slack
+- Vercel function entrypoint file: `api/index.py` (re-exports `app` from `app.py`)
 - Dedicated worker (`worker.py`) runs heavy pipeline:
   - generate 15 Exa prompts
   - fetch Exa results
