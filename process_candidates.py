@@ -22,6 +22,7 @@ except ImportError:
 CHANNEL_ID_DEFAULT = "C0AF5RGPMEW"
 SLACK_HISTORY_URL = "https://slack.com/api/conversations.history"
 SLACK_UPLOAD_URL = "https://slack.com/api/files.upload"
+SLACK_POST_MESSAGE_URL = "https://slack.com/api/chat.postMessage"
 
 STAGES = [
     "fetch_jd",
@@ -577,7 +578,170 @@ def upload_csv_to_slack(
     return payload
 
 
-def parse_args() -> argparse.Namespace:
+def post_slack_message(
+    slack_token: str,
+    channel_id: str,
+    text: str,
+) -> Dict[str, Any]:
+    headers = {
+        "Authorization": f"Bearer {slack_token}",
+        "Content-Type": "application/json; charset=utf-8",
+    }
+    payload = {
+        "channel": channel_id,
+        "text": text,
+    }
+    response = requests.post(
+        SLACK_POST_MESSAGE_URL,
+        headers=headers,
+        json=payload,
+        timeout=60,
+    )
+    response.raise_for_status()
+    body = response.json()
+    if not body.get("ok"):
+        raise RuntimeError(f"Slack chat.postMessage failed: {body.get('error')}")
+    return body
+
+
+def post_pipeline_update(slack_token: str, channel_id: str, text: str) -> None:
+    try:
+        post_slack_message(
+            slack_token=slack_token,
+            channel_id=channel_id,
+            text=text,
+        )
+    except Exception as exc:
+        print(f"[warn] failed to post progress update to Slack: {exc}")
+
+
+def run_pipeline_from_jd_text(
+    *,
+    jd_text: str,
+    jd_message_ts: Optional[str],
+    args: argparse.Namespace,
+    client: OpenAI,
+    exa_api_key: str,
+    slack_token: str,
+) -> Dict[str, Any]:
+    exa_query_prompt_template = read_text_file(args.exa_query_prompt_path)
+    scorer_prompt_template = read_text_file(args.scorer_prompt_path)
+
+    write_text_file(args.jd_path, jd_text)
+    print(f"Wrote JD text to {args.jd_path}")
+    post_pipeline_update(
+        slack_token=slack_token,
+        channel_id=args.channel_id,
+        text=(
+            "Started JD pipeline"
+            + (f" for message ts={jd_message_ts}." if jd_message_ts else ".")
+        ),
+    )
+
+    debug_pause(args.debug, "generate_queries")
+    queries = generate_exa_queries(
+        client=client,
+        jd_text=jd_text,
+        exa_query_prompt_template=exa_query_prompt_template,
+        model=args.model,
+    )
+    debug_log_path = save_debug_queries(args.debug, args.debug_dir, queries)
+    if debug_log_path:
+        print(f"Debug query log saved: {debug_log_path}")
+    post_pipeline_update(
+        slack_token=slack_token,
+        channel_id=args.channel_id,
+        text=f"{len(queries)} Exa prompts created.",
+    )
+    maybe_stop(args.stop_after, "generate_queries")
+
+    debug_pause(args.debug, "exa_search")
+    consolidated = run_exa_fanout(
+        exa_api_key=exa_api_key,
+        queries=queries,
+        num_results_per_query=args.num_results_per_query,
+    )
+    print(f"Total Exa results fetched: {consolidated.get('total_results')}")
+    post_pipeline_update(
+        slack_token=slack_token,
+        channel_id=args.channel_id,
+        text=(
+            f"{int(consolidated.get('total_results') or 0)} candidates fetched "
+            f"from Exa across {len(queries)} prompts."
+        ),
+    )
+    maybe_stop(args.stop_after, "exa_search")
+
+    debug_pause(args.debug, "csv")
+    write_consolidated_json(args.results_json, consolidated)
+    rows = flatten_exa_results_to_rows(consolidated.get("results", []))
+    csv_df = write_results_csv(args.candidates_csv, rows)
+    print(f"Wrote {len(csv_df)} rows to {args.candidates_csv}")
+    post_pipeline_update(
+        slack_token=slack_token,
+        channel_id=args.channel_id,
+        text=f"Consolidated CSV created with {len(csv_df)} rows.",
+    )
+    maybe_stop(args.stop_after, "csv")
+
+    debug_pause(args.debug, "dedup")
+    dedup_df = deduplicate_csv(args.candidates_csv, args.dedup_csv)
+    print(f"Deduplicated: {len(csv_df)} -> {len(dedup_df)} rows. Output: {args.dedup_csv}")
+    post_pipeline_update(
+        slack_token=slack_token,
+        channel_id=args.channel_id,
+        text=f"{len(dedup_df)} candidates after deduplication (from {len(csv_df)}).",
+    )
+    maybe_stop(args.stop_after, "dedup")
+
+    debug_pause(args.debug, "score")
+    scored_df = score_candidates_csv(
+        client=client,
+        input_csv=args.dedup_csv,
+        output_csv=args.scored_csv,
+        jd_text=jd_text,
+        scorer_prompt_template=scorer_prompt_template,
+        model=args.model,
+    )
+    print(f"Scored rows: {len(scored_df)}. Output: {args.scored_csv}")
+    post_pipeline_update(
+        slack_token=slack_token,
+        channel_id=args.channel_id,
+        text=f"AI scoring completed for {len(scored_df)} candidates.",
+    )
+    maybe_stop(args.stop_after, "score")
+
+    debug_pause(args.debug, "post")
+    slack_upload = upload_csv_to_slack(
+        slack_token=slack_token,
+        channel_id=args.channel_id,
+        csv_path=args.scored_csv,
+        initial_comment=(
+            "AI scored candidates CSV generated from # JD message "
+            f"(ts={jd_message_ts or 'unknown'})."
+        ),
+    )
+    file_id = (slack_upload.get("file") or {}).get("id")
+    print(f"Uploaded scored CSV to Slack channel {args.channel_id}. file_id={file_id}")
+    post_pipeline_update(
+        slack_token=slack_token,
+        channel_id=args.channel_id,
+        text=f"Pipeline complete. Scored CSV uploaded (file_id={file_id}).",
+    )
+    maybe_stop(args.stop_after, "post")
+
+    return {
+        "queries_count": len(queries),
+        "total_results": int(consolidated.get("total_results") or 0),
+        "rows_before_dedup": int(len(csv_df)),
+        "rows_after_dedup": int(len(dedup_df)),
+        "rows_scored": int(len(scored_df)),
+        "uploaded_file_id": file_id,
+        "debug_queries_log": debug_log_path,
+    }
+
+
+def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="JIT Talent AI scoring pipeline")
     parser.add_argument("--channel-id", default=CHANNEL_ID_DEFAULT)
     parser.add_argument("--debug", action="store_true", help="Enable debug logs and step-by-step prompt")
@@ -595,7 +759,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--scored-csv", default="candidates-scored.csv")
     parser.add_argument("--debug-dir", default="debug")
     parser.add_argument("--num-results-per-query", type=int, default=100)
-    return parser.parse_args()
+    return parser.parse_args(argv)
 
 
 def main() -> None:
@@ -617,70 +781,17 @@ def main() -> None:
             channel_id=args.channel_id,
             max_messages=args.max_messages,
         )
-        write_text_file(args.jd_path, jd_text)
-        print(f"Fetched JD from Slack message ts={jd_message.get('ts')} and wrote {args.jd_path}")
+        print(f"Fetched JD from Slack message ts={jd_message.get('ts')}")
         maybe_stop(args.stop_after, "fetch_jd")
 
-        debug_pause(args.debug, "generate_queries")
-        exa_query_prompt_template = read_text_file(args.exa_query_prompt_path)
-        queries = generate_exa_queries(
-            client=client,
+        run_pipeline_from_jd_text(
             jd_text=jd_text,
-            exa_query_prompt_template=exa_query_prompt_template,
-            model=args.model,
-        )
-        debug_log_path = save_debug_queries(args.debug, args.debug_dir, queries)
-        if debug_log_path:
-            print(f"Debug query log saved: {debug_log_path}")
-        maybe_stop(args.stop_after, "generate_queries")
-
-        debug_pause(args.debug, "exa_search")
-        consolidated = run_exa_fanout(
+            jd_message_ts=jd_message.get("ts"),
+            args=args,
+            client=client,
             exa_api_key=exa_api_key,
-            queries=queries,
-            num_results_per_query=args.num_results_per_query,
-        )
-        print(f"Total Exa results fetched: {consolidated.get('total_results')}")
-        maybe_stop(args.stop_after, "exa_search")
-
-        debug_pause(args.debug, "csv")
-        write_consolidated_json(args.results_json, consolidated)
-        rows = flatten_exa_results_to_rows(consolidated.get("results", []))
-        csv_df = write_results_csv(args.candidates_csv, rows)
-        print(f"Wrote {len(csv_df)} rows to {args.candidates_csv}")
-        maybe_stop(args.stop_after, "csv")
-
-        debug_pause(args.debug, "dedup")
-        dedup_df = deduplicate_csv(args.candidates_csv, args.dedup_csv)
-        print(f"Deduplicated: {len(csv_df)} -> {len(dedup_df)} rows. Output: {args.dedup_csv}")
-        maybe_stop(args.stop_after, "dedup")
-
-        debug_pause(args.debug, "score")
-        scorer_prompt_template = read_text_file(args.scorer_prompt_path)
-        scored_df = score_candidates_csv(
-            client=client,
-            input_csv=args.dedup_csv,
-            output_csv=args.scored_csv,
-            jd_text=jd_text,
-            scorer_prompt_template=scorer_prompt_template,
-            model=args.model,
-        )
-        print(f"Scored rows: {len(scored_df)}. Output: {args.scored_csv}")
-        maybe_stop(args.stop_after, "score")
-
-        debug_pause(args.debug, "post")
-        slack_upload = upload_csv_to_slack(
             slack_token=slack_token,
-            channel_id=args.channel_id,
-            csv_path=args.scored_csv,
-            initial_comment=(
-                "AI scored candidates CSV generated from latest # JD message "
-                f"(ts={jd_message.get('ts')})."
-            ),
         )
-        file_id = (slack_upload.get("file") or {}).get("id")
-        print(f"Uploaded scored CSV to Slack channel {args.channel_id}. file_id={file_id}")
-        maybe_stop(args.stop_after, "post")
 
     except PipelineStop as stop_exc:
         print(str(stop_exc))
