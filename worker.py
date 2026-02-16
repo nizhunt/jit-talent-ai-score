@@ -57,7 +57,7 @@ def process_jd_pipeline_job(
     post_slack_message(
         slack_token=slack_token,
         channel_id=channel_id,
-        text=f"Queued JD job started (event_id={event_id or 'unknown'}, ts={message_ts or 'unknown'}).",
+        text="Thanks for sharing the JD. Processing has started.",
     )
 
     client = OpenAI(api_key=openai_api_key)

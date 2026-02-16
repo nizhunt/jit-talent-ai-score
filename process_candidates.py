@@ -3,8 +3,9 @@ import hashlib
 import json
 import os
 import re
+import time
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 from urllib.parse import urlsplit
 
 import pandas as pd
@@ -23,6 +24,8 @@ CHANNEL_ID_DEFAULT = "C0AF5RGPMEW"
 SLACK_HISTORY_URL = "https://slack.com/api/conversations.history"
 SLACK_UPLOAD_URL = "https://slack.com/api/files.upload"
 SLACK_POST_MESSAGE_URL = "https://slack.com/api/chat.postMessage"
+SLACK_GET_UPLOAD_URL_EXTERNAL = "https://slack.com/api/files.getUploadURLExternal"
+SLACK_COMPLETE_UPLOAD_EXTERNAL = "https://slack.com/api/files.completeUploadExternal"
 
 STAGES = [
     "fetch_jd",
@@ -223,6 +226,20 @@ def save_debug_queries(debug: bool, debug_dir: str, queries: List[str]) -> Optio
     path = os.path.join(debug_dir, filename)
 
     lines = []
+    for idx, query in enumerate(queries, start=1):
+        lines.append(f"{idx}. {query}")
+        lines.append("")
+
+    write_text_file(path, "\\n".join(lines).strip() + "\\n")
+    return path
+
+
+def write_queries_log_file(output_dir: str, queries: List[str]) -> str:
+    os.makedirs(output_dir, exist_ok=True)
+    filename = datetime.now().strftime("exa-queries-%Y%m%d-%H%M%S.txt")
+    path = os.path.join(output_dir, filename)
+
+    lines: List[str] = []
     for idx, query in enumerate(queries, start=1):
         lines.append(f"{idx}. {query}")
         lines.append("")
@@ -518,6 +535,9 @@ def score_candidates_csv(
     jd_text: str,
     scorer_prompt_template: str,
     model: str,
+    progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+    notify_every: int = 50,
+    initial_seconds_per_candidate: float = 2.5,
 ) -> pd.DataFrame:
     df = pd.read_csv(input_csv)
     if "ai-score" not in df.columns:
@@ -528,8 +548,18 @@ def score_candidates_csv(
     pending = df["ai-score"].isna()
     pending_count = int(pending.sum())
     print(f"Scoring {pending_count} candidates...")
+    if progress_callback is not None:
+        progress_callback(
+            {
+                "event": "start",
+                "pending_count": pending_count,
+                "eta_seconds": pending_count * max(0.1, initial_seconds_per_candidate),
+                "seconds_per_candidate": max(0.1, initial_seconds_per_candidate),
+            }
+        )
 
     progress = tqdm(total=pending_count, desc="Scoring", unit="candidate")
+    started_at = time.monotonic()
 
     for idx in df.index:
         if not pending[idx]:
@@ -551,6 +581,27 @@ def score_candidates_csv(
         df.at[idx, "ai-reason"] = reason
         progress.update(1)
 
+        processed = int(progress.n)
+        if processed > 0 and progress_callback is not None:
+            elapsed = time.monotonic() - started_at
+            seconds_per_candidate = elapsed / processed
+            remaining = max(0, pending_count - processed)
+            eta_seconds = remaining * seconds_per_candidate
+            if (
+                processed == 1
+                or (notify_every > 0 and (processed % notify_every) == 0)
+                or processed == pending_count
+            ):
+                progress_callback(
+                    {
+                        "event": "progress",
+                        "processed": processed,
+                        "pending_count": pending_count,
+                        "seconds_per_candidate": seconds_per_candidate,
+                        "eta_seconds": eta_seconds,
+                    }
+                )
+
         if (progress.n % 10) == 0:
             reorder_columns(df, SCORED_CSV_FIRST_COLUMNS).to_csv(output_csv, index=False)
 
@@ -560,35 +611,95 @@ def score_candidates_csv(
     return df
 
 
+def upload_file_to_slack(
+    slack_token: str,
+    channel_id: str,
+    file_path: str,
+    initial_comment: str,
+    content_type: str,
+) -> Dict[str, Any]:
+    headers = {"Authorization": f"Bearer {slack_token}"}
+    filename = os.path.basename(file_path)
+    file_size = os.path.getsize(file_path)
+
+    # Step 1: ask Slack for an external upload URL.
+    get_upload_resp = requests.post(
+        SLACK_GET_UPLOAD_URL_EXTERNAL,
+        headers=headers,
+        data={
+            "filename": filename,
+            "length": str(file_size),
+        },
+        timeout=60,
+    )
+    get_upload_resp.raise_for_status()
+    get_upload_payload = get_upload_resp.json()
+    if not get_upload_payload.get("ok"):
+        raise RuntimeError(f"Slack getUploadURLExternal failed: {get_upload_payload.get('error')}")
+
+    upload_url = get_upload_payload.get("upload_url")
+    file_id = get_upload_payload.get("file_id")
+    if not upload_url or not file_id:
+        raise RuntimeError("Slack getUploadURLExternal returned missing upload_url or file_id.")
+
+    # Step 2: upload file bytes to the pre-signed URL.
+    with open(file_path, "rb") as f:
+        upload_resp = requests.post(
+            upload_url,
+            files={"file": (filename, f, content_type)},
+            timeout=120,
+        )
+    upload_resp.raise_for_status()
+
+    # Step 3: finalize upload and share in channel.
+    complete_resp = requests.post(
+        SLACK_COMPLETE_UPLOAD_EXTERNAL,
+        headers=headers,
+        data={
+            "files": json.dumps([{"id": file_id, "title": filename}]),
+            "channel_id": channel_id,
+            "initial_comment": initial_comment,
+        },
+        timeout=60,
+    )
+    complete_resp.raise_for_status()
+    complete_payload = complete_resp.json()
+    if not complete_payload.get("ok"):
+        raise RuntimeError(f"Slack completeUploadExternal failed: {complete_payload.get('error')}")
+
+    # Keep backward compatibility with callsites expecting payload['file'].
+    if "file" not in complete_payload:
+        files = complete_payload.get("files")
+        if isinstance(files, list) and files:
+            complete_payload["file"] = files[0]
+
+    return complete_payload
+
+
 def upload_csv_to_slack(
     slack_token: str,
     channel_id: str,
     csv_path: str,
     initial_comment: str,
 ) -> Dict[str, Any]:
-    headers = {"Authorization": f"Bearer {slack_token}"}
-    data = {
-        "channels": channel_id,
-        "filename": os.path.basename(csv_path),
-        "title": os.path.basename(csv_path),
-        "initial_comment": initial_comment,
-    }
+    return upload_file_to_slack(
+        slack_token=slack_token,
+        channel_id=channel_id,
+        file_path=csv_path,
+        initial_comment=initial_comment,
+        content_type="text/csv",
+    )
 
-    with open(csv_path, "rb") as f:
-        files = {"file": (os.path.basename(csv_path), f, "text/csv")}
-        response = requests.post(
-            SLACK_UPLOAD_URL,
-            headers=headers,
-            data=data,
-            files=files,
-            timeout=120,
-        )
 
-    response.raise_for_status()
-    payload = response.json()
-    if not payload.get("ok"):
-        raise RuntimeError(f"Slack file upload failed: {payload.get('error')}")
-    return payload
+def format_eta_seconds(eta_seconds: float) -> str:
+    seconds = max(0, int(round(eta_seconds)))
+    minutes, sec = divmod(seconds, 60)
+    hours, minutes = divmod(minutes, 60)
+    if hours > 0:
+        return f"{hours}h {minutes}m {sec}s"
+    if minutes > 0:
+        return f"{minutes}m {sec}s"
+    return f"{sec}s"
 
 
 def post_slack_message(
@@ -645,10 +756,7 @@ def run_pipeline_from_jd_text(
     post_pipeline_update(
         slack_token=slack_token,
         channel_id=args.channel_id,
-        text=(
-            "Started JD pipeline"
-            + (f" for message ts={jd_message_ts}." if jd_message_ts else ".")
-        ),
+        text="Started processing the JD.",
     )
 
     debug_pause(args.debug, "generate_queries")
@@ -661,6 +769,18 @@ def run_pipeline_from_jd_text(
     debug_log_path = save_debug_queries(args.debug, args.debug_dir, queries)
     if debug_log_path:
         print(f"Debug query log saved: {debug_log_path}")
+    logs_dir = args.debug_dir if args.debug else os.path.join(os.path.dirname(args.jd_path), "logs")
+    queries_log_path = write_queries_log_file(logs_dir, queries)
+    try:
+        upload_file_to_slack(
+            slack_token=slack_token,
+            channel_id=args.channel_id,
+            file_path=queries_log_path,
+            initial_comment=f"{len(queries)} Exa prompts generated for this JD.",
+            content_type="text/plain",
+        )
+    except Exception as exc:
+        print(f"[warn] failed to upload Exa prompt log to Slack: {exc}")
     post_pipeline_update(
         slack_token=slack_token,
         channel_id=args.channel_id,
@@ -708,6 +828,37 @@ def run_pipeline_from_jd_text(
     maybe_stop(args.stop_after, "dedup")
 
     debug_pause(args.debug, "score")
+    notify_every = max(1, int(os.getenv("SCORE_PROGRESS_NOTIFY_EVERY", "50")))
+    initial_spc = max(0.1, float(os.getenv("SCORE_INITIAL_SECONDS_PER_CANDIDATE", "2.5")))
+
+    def on_score_progress(payload: Dict[str, Any]) -> None:
+        event_type = payload.get("event")
+        if event_type == "start":
+            post_pipeline_update(
+                slack_token=slack_token,
+                channel_id=args.channel_id,
+                text=(
+                    "Evaluation started. "
+                    f"ETA: {format_eta_seconds(float(payload.get('eta_seconds') or 0))} "
+                    f"(~{float(payload.get('seconds_per_candidate') or 0):.2f}s/candidate)."
+                ),
+            )
+            return
+
+        if event_type == "progress":
+            processed = int(payload.get("processed") or 0)
+            total = int(payload.get("pending_count") or 0)
+            pct = (processed / total * 100.0) if total else 100.0
+            post_pipeline_update(
+                slack_token=slack_token,
+                channel_id=args.channel_id,
+                text=(
+                    f"Scoring: {pct:.0f}% ({processed}/{total}). "
+                    f"ETA: {format_eta_seconds(float(payload.get('eta_seconds') or 0))} "
+                    f"({float(payload.get('seconds_per_candidate') or 0):.2f}s/candidate)."
+                ),
+            )
+
     scored_df = score_candidates_csv(
         client=client,
         input_csv=args.dedup_csv,
@@ -715,6 +866,9 @@ def run_pipeline_from_jd_text(
         jd_text=jd_text,
         scorer_prompt_template=scorer_prompt_template,
         model=args.model,
+        progress_callback=on_score_progress,
+        notify_every=notify_every,
+        initial_seconds_per_candidate=initial_spc,
     )
     print(f"Scored rows: {len(scored_df)}. Output: {args.scored_csv}")
     post_pipeline_update(
@@ -729,17 +883,14 @@ def run_pipeline_from_jd_text(
         slack_token=slack_token,
         channel_id=args.channel_id,
         csv_path=args.scored_csv,
-        initial_comment=(
-            "AI scored candidates CSV generated from # JD message "
-            f"(ts={jd_message_ts or 'unknown'})."
-        ),
+        initial_comment="Here is the AI-scored candidates CSV for this JD.",
     )
     file_id = (slack_upload.get("file") or {}).get("id")
     print(f"Uploaded scored CSV to Slack channel {args.channel_id}. file_id={file_id}")
     post_pipeline_update(
         slack_token=slack_token,
         channel_id=args.channel_id,
-        text=f"Pipeline complete. Scored CSV uploaded (file_id={file_id}).",
+        text="Pipeline complete. Scored CSV uploaded.",
     )
     maybe_stop(args.stop_after, "post")
 

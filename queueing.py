@@ -2,7 +2,7 @@ import os
 from typing import Any, Dict, Optional
 
 from redis import Redis
-from rq import Queue, Retry
+from rq import Queue
 
 
 DEFAULT_QUEUE_NAME = "jd-pipeline"
@@ -56,13 +56,10 @@ def clear_event_seen(event_id: str) -> None:
 
 def enqueue_jd_pipeline_job(payload: Dict[str, Any]):
     queue = get_queue()
-    retry_max = int(os.getenv("RQ_RETRY_MAX", "2"))
-    retry = Retry(max=retry_max, interval=[60, 300]) if retry_max > 0 else None
     return queue.enqueue(
         "worker.process_jd_pipeline_job",
         kwargs=payload,
         job_timeout=int(os.getenv("RQ_JOB_TIMEOUT", "7200")),
         result_ttl=int(os.getenv("RQ_RESULT_TTL", "86400")),
         failure_ttl=int(os.getenv("RQ_FAILURE_TTL", "604800")),
-        retry=retry,
     )

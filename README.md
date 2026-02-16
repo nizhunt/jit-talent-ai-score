@@ -33,8 +33,9 @@ Optional:
 - `SLACK_CHANNEL_ID` (default `C0AF5RGPMEW`)
 - `RQ_QUEUE_NAME` (default `jd-pipeline`)
 - `RQ_JOB_TIMEOUT` (default `7200`)
-- `RQ_RETRY_MAX` (default `2`)
 - `SLACK_EVENT_TTL_SECONDS` (default `86400`)
+- `SCORE_PROGRESS_NOTIFY_EVERY` (default `50`)
+- `SCORE_INITIAL_SECONDS_PER_CANDIDATE` (default `2.5`)
 
 ## Slack App Setup
 
@@ -102,3 +103,4 @@ Endpoints:
 
 - Pipeline outputs are written under `/tmp` in worker runs.
 - Step updates are posted to Slack at each stage completion.
+- The 15 generated Exa prompts are uploaded to Slack as a `.txt` file per run.
