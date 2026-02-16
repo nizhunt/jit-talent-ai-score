@@ -17,7 +17,9 @@ def require_env(name: str) -> str:
 
 
 def get_redis_connection() -> Redis:
-    redis_url = require_env("REDIS_URL")
+    redis_url = os.getenv("REDIS_URL") or os.getenv("KV_URL")
+    if not redis_url:
+        raise RuntimeError("Missing required env var: REDIS_URL (or KV_URL)")
     return Redis.from_url(redis_url)
 
 
