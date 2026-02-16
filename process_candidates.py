@@ -231,6 +231,22 @@ def save_debug_queries(debug: bool, debug_dir: str, queries: List[str]) -> Optio
     return path
 
 
+def to_plain_object(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {k: to_plain_object(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [to_plain_object(v) for v in value]
+    if isinstance(value, tuple):
+        return [to_plain_object(v) for v in value]
+    if hasattr(value, "model_dump"):
+        return to_plain_object(value.model_dump())
+    if hasattr(value, "dict"):
+        return to_plain_object(value.dict())
+    if hasattr(value, "__dict__"):
+        return to_plain_object(dict(value.__dict__))
+    return value
+
+
 def exa_search_one(exa: Any, query: str, num_results: int = 100) -> Dict[str, Any]:
     result = exa.search(
         query,
@@ -244,17 +260,9 @@ def exa_search_one(exa: Any, query: str, num_results: int = 100) -> Dict[str, An
         },
     )
 
+    result = to_plain_object(result)
     if isinstance(result, dict):
         return result
-
-    if hasattr(result, "model_dump"):
-        return result.model_dump()
-
-    if hasattr(result, "dict"):
-        return result.dict()
-
-    if hasattr(result, "__dict__"):
-        return dict(result.__dict__)
 
     raise RuntimeError("Unexpected Exa response type; could not convert to dict.")
 
@@ -279,7 +287,12 @@ def run_exa_fanout(
             query=query,
             num_results=num_results_per_query,
         )
-        items = result.get("results", [])
+        raw_items = result.get("results", [])
+        items: List[Dict[str, Any]] = []
+        for raw_item in raw_items if isinstance(raw_items, list) else []:
+            item = to_plain_object(raw_item)
+            if isinstance(item, dict):
+                items.append(item)
 
         for item in items:
             item["_source_query_index"] = idx
