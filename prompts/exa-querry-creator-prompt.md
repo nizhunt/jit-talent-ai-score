@@ -32,8 +32,8 @@ Generate 15 unique Exa search prompts following this structure but varying the a
 15. Complete reshuffle, lead with critical must-haves
 
 **Output Format:**
-- Each prompt: 150-200 words, dense single paragraph
-- Keep all requirements but vary order and emphasis
+- Each prompt: 200-250 words, dense single paragraph
+- Keep all important requirements but vary order and emphasis
 - Maintain specificity from JD
 - Include exclusions at end if provided
 - Number each prompt 1-15

@@ -22,7 +22,6 @@ except ImportError:
 
 CHANNEL_ID_DEFAULT = "C0AF5RGPMEW"
 SLACK_HISTORY_URL = "https://slack.com/api/conversations.history"
-SLACK_UPLOAD_URL = "https://slack.com/api/files.upload"
 SLACK_POST_MESSAGE_URL = "https://slack.com/api/chat.postMessage"
 SLACK_GET_UPLOAD_URL_EXTERNAL = "https://slack.com/api/files.getUploadURLExternal"
 SLACK_COMPLETE_UPLOAD_EXTERNAL = "https://slack.com/api/files.completeUploadExternal"
@@ -216,23 +215,6 @@ def generate_exa_queries(
 
     usage = extract_usage_tokens(response)
     return queries, usage
-
-
-def save_debug_queries(debug: bool, debug_dir: str, queries: List[str]) -> Optional[str]:
-    if not debug:
-        return None
-
-    os.makedirs(debug_dir, exist_ok=True)
-    filename = datetime.now().strftime("exa-queries-%Y%m%d-%H%M%S.txt")
-    path = os.path.join(debug_dir, filename)
-
-    lines = []
-    for idx, query in enumerate(queries, start=1):
-        lines.append(f"{idx}. {query}")
-        lines.append("")
-
-    write_text_file(path, "\\n".join(lines).strip() + "\\n")
-    return path
 
 
 def write_queries_log_file(output_dir: str, queries: List[str]) -> str:
@@ -797,7 +779,6 @@ def post_pipeline_update(slack_token: str, channel_id: str, text: str) -> None:
 def run_pipeline_from_jd_text(
     *,
     jd_text: str,
-    jd_message_ts: Optional[str],
     args: argparse.Namespace,
     client: OpenAI,
     exa_api_key: str,
@@ -816,11 +797,10 @@ def run_pipeline_from_jd_text(
         exa_query_prompt_template=exa_query_prompt_template,
         model=args.model,
     )
-    debug_log_path = save_debug_queries(args.debug, args.debug_dir, queries)
-    if debug_log_path:
-        print(f"Debug query log saved: {debug_log_path}")
     logs_dir = args.debug_dir if args.debug else os.path.join(os.path.dirname(args.jd_path), "logs")
     queries_log_path = write_queries_log_file(logs_dir, queries)
+    if args.debug:
+        print(f"Debug query log saved: {queries_log_path}")
     try:
         upload_file_to_slack(
             slack_token=slack_token,
@@ -968,7 +948,7 @@ def run_pipeline_from_jd_text(
         "rows_after_dedup": int(len(dedup_df)),
         "rows_scored": int(len(scored_df)),
         "uploaded_file_id": file_id,
-        "debug_queries_log": debug_log_path,
+        "queries_log_path": queries_log_path,
         "cost_summary": cost_summary,
     }
 
@@ -1018,7 +998,6 @@ def main() -> None:
 
         run_pipeline_from_jd_text(
             jd_text=jd_text,
-            jd_message_ts=jd_message.get("ts"),
             args=args,
             client=client,
             exa_api_key=exa_api_key,

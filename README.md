@@ -33,7 +33,11 @@ Optional:
 - `SLACK_CHANNEL_ID` (default `C0AF5RGPMEW`)
 - `RQ_QUEUE_NAME` (default `jd-pipeline`)
 - `RQ_JOB_TIMEOUT` (default `7200`)
+- `RQ_WITH_SCHEDULER` (default `false`; keep disabled unless you use scheduled RQ jobs)
 - `SLACK_EVENT_TTL_SECONDS` (default `86400`)
+- `SLACK_EVENT_DEDUP_ENABLED` (default `true`)
+- `SLACK_EVENT_DEDUP_FAIL_OPEN` (default `true`)
+- `SLACK_ACK_QUEUE_UNAVAILABLE` (default `true`; returns `200` degraded responses to Slack when Redis is unavailable)
 - `SCORE_PROGRESS_NOTIFY_EVERY` (default `50`)
 - `SCORE_INITIAL_SECONDS_PER_CANDIDATE` (default `2.5`)
 

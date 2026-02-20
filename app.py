@@ -2,19 +2,46 @@ import hashlib
 import hmac
 import os
 import time
-from typing import Dict
+from typing import Dict, Optional
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, PlainTextResponse
 
-from queueing import clear_event_seen, enqueue_jd_pipeline_job, mark_event_seen, require_env
+from queueing import (
+    QueueingUnavailableError,
+    clear_event_seen,
+    enqueue_jd_pipeline_job,
+    mark_event_seen,
+    require_env,
+)
 
 
 load_dotenv()
 
 app = FastAPI(title="JIT Talent Slack Webhook")
 CHANNEL_ID_DEFAULT = "C0AF5RGPMEW"
+
+
+def _is_truthy(value: Optional[str], default: bool) -> bool:
+    if value is None:
+        return default
+    return value.strip().lower() not in {"0", "false", "no", "off", ""}
+
+
+def _queue_unavailable_response(stage: str, detail: str) -> JSONResponse:
+    payload = {
+        "ok": True,
+        "status": "degraded",
+        "ignored": "queue_unavailable",
+        "stage": stage,
+        "detail": detail,
+    }
+    # Ack Slack by default to avoid retry storms while Redis is degraded/out of quota.
+    ack_queue_unavailable = _is_truthy(os.getenv("SLACK_ACK_QUEUE_UNAVAILABLE"), default=True)
+    if ack_queue_unavailable:
+        return JSONResponse(payload, status_code=200)
+    return JSONResponse(payload, status_code=503)
 
 
 def is_jd_message(text: str) -> bool:
@@ -102,9 +129,18 @@ async def slack_events(request: Request):
     if not jd_text:
         return JSONResponse({"ok": True, "ignored": "empty_jd"})
 
-    # Cross-instance idempotency: only first webhook delivery for an event id is accepted.
-    if not mark_event_seen(event_id):
-        return JSONResponse({"ok": True, "ignored": "duplicate_event"})
+    dedup_enabled = _is_truthy(os.getenv("SLACK_EVENT_DEDUP_ENABLED"), default=True)
+    event_marked_seen = False
+    if dedup_enabled:
+        # Cross-instance idempotency: only first webhook delivery for an event id is accepted.
+        try:
+            is_first_delivery = mark_event_seen(event_id)
+        except QueueingUnavailableError as exc:
+            return _queue_unavailable_response(stage="dedup", detail=str(exc))
+
+        if not is_first_delivery:
+            return JSONResponse({"ok": True, "ignored": "duplicate_event"})
+        event_marked_seen = True
 
     message_ts = event.get("ts")
     try:
@@ -116,8 +152,13 @@ async def slack_events(request: Request):
                 "event_id": event_id,
             }
         )
+    except QueueingUnavailableError as exc:
+        if event_marked_seen:
+            clear_event_seen(event_id)
+        return _queue_unavailable_response(stage="enqueue", detail=str(exc))
     except Exception as exc:
-        clear_event_seen(event_id)
+        if event_marked_seen:
+            clear_event_seen(event_id)
         raise HTTPException(status_code=503, detail=f"queue_enqueue_failed: {exc}") from exc
 
     return JSONResponse({"ok": True, "status": "queued", "job_id": job.id})

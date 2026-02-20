@@ -18,6 +18,12 @@ def require_env(name: str) -> str:
     return value
 
 
+def _is_truthy(value: Optional[str], default: bool) -> bool:
+    if value is None:
+        return default
+    return value.strip().lower() not in {"0", "false", "no", "off", ""}
+
+
 def build_pipeline_args(channel_id: str) -> argparse.Namespace:
     args = parse_args([])
     args.channel_id = channel_id
@@ -49,6 +55,7 @@ def process_jd_pipeline_job(
     event_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     load_dotenv()
+    _ = message_ts  # reserved for compatibility with existing enqueued payloads
 
     openai_api_key = require_env("OPENAI_API_KEY")
     exa_api_key = require_env("EXA_API_KEY")
@@ -64,7 +71,6 @@ def process_jd_pipeline_job(
     args = build_pipeline_args(channel_id=channel_id)
     result = run_pipeline_from_jd_text(
         jd_text=jd_text,
-        jd_message_ts=message_ts,
         args=args,
         client=client,
         exa_api_key=exa_api_key,
@@ -76,6 +82,11 @@ def process_jd_pipeline_job(
 def parse_worker_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="RQ worker for JD pipeline")
     parser.add_argument("--burst", action="store_true", help="Exit after current queue is drained")
+    parser.add_argument(
+        "--with-scheduler",
+        action="store_true",
+        help="Enable RQ scheduler. Disabled by default to reduce Redis command volume.",
+    )
     return parser.parse_args()
 
 
@@ -86,7 +97,8 @@ def main() -> None:
     conn = get_redis_connection()
     queue_name = get_queue_name()
     worker = Worker([queue_name], connection=conn)
-    worker.work(with_scheduler=True, burst=args.burst)
+    with_scheduler = args.with_scheduler or _is_truthy(os.getenv("RQ_WITH_SCHEDULER"), default=False)
+    worker.work(with_scheduler=with_scheduler, burst=args.burst)
 
 
 if __name__ == "__main__":
