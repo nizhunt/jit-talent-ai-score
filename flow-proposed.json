@@ -1,0 +1,229 @@
+{
+  "version": 1,
+  "title": "JIT Talent AI Score Pipeline",
+  "description": "Visual map of the Slack -> queue -> worker pipeline. Use the proposed flow file to plan logic changes.",
+  "updated_at": "2026-02-22T09:49:56.579860Z",
+  "nodes": [
+    {
+      "id": "slack_event",
+      "type": "trigger",
+      "label": "Slack Event Received",
+      "description": "POST /slack/events accepts incoming Slack payload.",
+      "status": "current",
+      "x": 40,
+      "y": 160
+    },
+    {
+      "id": "verify_signature",
+      "type": "decision",
+      "label": "Verify Slack Signature",
+      "description": "Reject invalid signature or stale timestamp.",
+      "status": "current",
+      "x": 340,
+      "y": 160
+    },
+    {
+      "id": "validate_message",
+      "type": "decision",
+      "label": "Is #JD Message in Target Channel?",
+      "description": "Filters bot messages, wrong channel, non-JD format, empty JD.",
+      "status": "current",
+      "x": 660,
+      "y": 160
+    },
+    {
+      "id": "deduplicate_event",
+      "type": "decision",
+      "label": "Deduplicate Slack Event",
+      "description": "Cross-instance dedup by event id before enqueue.",
+      "status": "current",
+      "x": 980,
+      "y": 160
+    },
+    {
+      "id": "enqueue_job",
+      "type": "action",
+      "label": "Enqueue JD Pipeline Job",
+      "description": "Pushes jd_text + metadata to Redis/RQ queue.",
+      "status": "current",
+      "x": 1280,
+      "y": 160
+    },
+    {
+      "id": "worker_pickup",
+      "type": "action",
+      "label": "Worker Picks Up Job",
+      "description": "worker.py pulls queue item and starts processing.",
+      "status": "current",
+      "x": 1560,
+      "y": 320
+    },
+    {
+      "id": "generate_queries",
+      "type": "action",
+      "label": "Generate 15 Exa Queries",
+      "description": "OpenAI generates query list from JD text.",
+      "status": "current",
+      "x": 1820,
+      "y": 160
+    },
+    {
+      "id": "exa_search",
+      "type": "action",
+      "label": "Run Exa Fanout Search",
+      "description": "Fetches candidate profiles from Exa per query.",
+      "status": "current",
+      "x": 2120,
+      "y": 160
+    },
+    {
+      "id": "build_csv",
+      "type": "data",
+      "label": "Build Candidate CSV",
+      "description": "Flatten Exa results and write candidates.csv.",
+      "status": "current",
+      "x": 2390,
+      "y": 160
+    },
+    {
+      "id": "dedup_candidates",
+      "type": "action",
+      "label": "Deduplicate Candidates",
+      "description": "Dedupes by normalized LinkedIn/name/location signals.",
+      "status": "current",
+      "x": 2660,
+      "y": 160
+    },
+    {
+      "id": "score_candidates",
+      "type": "action",
+      "label": "Score Candidates with AI",
+      "description": "Applies scoring prompt, posts progress updates to Slack.",
+      "status": "current",
+      "x": 2920,
+      "y": 160
+    },
+    {
+      "id": "upload_scored_csv",
+      "type": "output",
+      "label": "Upload Scored CSV to Slack",
+      "description": "Sends final scored file and summary updates to channel.",
+      "status": "current",
+      "x": 3190,
+      "y": 160
+    },
+    {
+      "id": "post_cost_summary",
+      "type": "output",
+      "label": "Post Cost Summary",
+      "description": "Computes and posts estimated per-candidate cost.",
+      "status": "current",
+      "x": 3190,
+      "y": 360
+    }
+  ],
+  "edges": [
+    {
+      "id": "e1",
+      "source": "slack_event",
+      "target": "verify_signature",
+      "label": "incoming event",
+      "source_port": "output_1",
+      "target_port": "input_1"
+    },
+    {
+      "id": "e2",
+      "source": "verify_signature",
+      "target": "validate_message",
+      "label": "valid signature",
+      "source_port": "output_1",
+      "target_port": "input_1"
+    },
+    {
+      "id": "e3",
+      "source": "validate_message",
+      "target": "deduplicate_event",
+      "label": "valid JD event",
+      "source_port": "output_1",
+      "target_port": "input_1"
+    },
+    {
+      "id": "e4",
+      "source": "deduplicate_event",
+      "target": "enqueue_job",
+      "label": "first delivery",
+      "source_port": "output_1",
+      "target_port": "input_1"
+    },
+    {
+      "id": "e5",
+      "source": "enqueue_job",
+      "target": "worker_pickup",
+      "label": "rq queue",
+      "source_port": "output_1",
+      "target_port": "input_1"
+    },
+    {
+      "id": "e6",
+      "source": "worker_pickup",
+      "target": "generate_queries",
+      "label": "start worker flow",
+      "source_port": "output_1",
+      "target_port": "input_1"
+    },
+    {
+      "id": "e7",
+      "source": "generate_queries",
+      "target": "exa_search",
+      "label": "15 queries",
+      "source_port": "output_1",
+      "target_port": "input_1"
+    },
+    {
+      "id": "e8",
+      "source": "exa_search",
+      "target": "build_csv",
+      "label": "results",
+      "source_port": "output_1",
+      "target_port": "input_1"
+    },
+    {
+      "id": "e9",
+      "source": "build_csv",
+      "target": "dedup_candidates",
+      "label": "candidates.csv",
+      "source_port": "output_1",
+      "target_port": "input_1"
+    },
+    {
+      "id": "e10",
+      "source": "dedup_candidates",
+      "target": "score_candidates",
+      "label": "dedup csv",
+      "source_port": "output_1",
+      "target_port": "input_1"
+    },
+    {
+      "id": "e11",
+      "source": "score_candidates",
+      "target": "upload_scored_csv",
+      "label": "scored csv",
+      "source_port": "output_1",
+      "target_port": "input_1"
+    },
+    {
+      "id": "e12",
+      "source": "score_candidates",
+      "target": "post_cost_summary",
+      "label": "token usage + costs",
+      "source_port": "output_1",
+      "target_port": "input_1"
+    }
+  ],
+  "notes": [
+    {
+      "id": "n1",
+      "text": "Edit flow-proposed.json while planning, then sync to flow-current.json after implementation."
+    }
+  ]
+}

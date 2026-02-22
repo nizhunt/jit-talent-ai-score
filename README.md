@@ -107,6 +107,49 @@ python worker.py
 Endpoints:
 - `GET /healthz`
 - `POST /slack/events`
+- `GET /flow` (interactive logic map editor)
+- `GET /api/flow?slot=proposed|current` (load flow JSON, default `proposed`)
+- `PUT /api/flow?slot=proposed|current` (save flow JSON, default `proposed`)
+- `POST /api/flow/reset?slot=proposed|current` (reset slot; proposed resets from current)
+- `POST /api/flow/copy-current-to-proposed` (overwrite proposed with current)
+- `POST /api/flow/promote-proposed-to-current` (promote proposed to current and sync both)
+
+## Flow Editor (Visual Pipeline)
+
+Use `/flow` to view and edit the pipeline as a node graph (n8n-style) without touching code first.
+The editor is now designed around two files:
+- `current` = implemented baseline
+- `proposed` = your planning/editing workspace
+
+Main capabilities:
+- drag nodes to reposition
+- connect/disconnect edges visually
+- add/remove nodes
+- `Add Node` creates a `proposed` node
+- edit node label/description in inspector
+- toggle between `proposed` and `current` views
+- `current` opens in read-only mode
+- save/reload/reset `proposed`
+- copy `current -> proposed`
+- copy full flow JSON for sharing/review
+
+Suggested workflow for this app:
+1. Open `/flow`.
+2. Work only in `proposed` mode (default).
+3. Add proposed nodes to represent planned changes (for example, a new validation or approval stage).
+4. Connect changed nodes where they should sit in the pipeline.
+5. Save proposed flow.
+6. During implementation, Codex maps `proposed` nodes to concrete categories (decision/data/action/etc.) and then syncs `proposed -> current`.
+
+Persistence:
+- Default current file path: `flow-current.json` in project root.
+- Default proposed file path: `flow-proposed.json` in project root.
+- Legacy fallback: `flow-definition.json` is still read for compatibility.
+- If paths are not writable (for example in serverless runtime), it falls back to `/tmp/flow-current.json` and `/tmp/flow-proposed.json`.
+- Optional overrides:
+  - `FLOW_CURRENT_STORAGE_PATH=/custom/path/current.json`
+  - `FLOW_PROPOSED_STORAGE_PATH=/custom/path/proposed.json`
+  - Legacy `FLOW_STORAGE_PATH` continues to work as proposed-path fallback.
 
 ## Notes
 

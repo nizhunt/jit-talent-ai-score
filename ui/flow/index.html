@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>JIT Talent Flow Editor</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=Space+Grotesk:wght@400;500;700&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/drawflow/dist/drawflow.min.css" />
+    <link rel="stylesheet" href="/ui/flow/style.css" />
+  </head>
+  <body class="flow-editor">
+    <div class="app-shell">
+      <header class="topbar">
+        <div>
+          <h1>Pipeline Flow Editor</h1>
+          <p>Interactive map of app logic for planning and implementation.</p>
+        </div>
+        <div class="top-actions">
+          <label class="slot-toggle" for="slotToggle" title="Switch between proposed and current flow views">
+            <span>Proposed</span>
+            <input id="slotToggle" type="checkbox" />
+            <span class="slot-toggle__slider"></span>
+            <span>Current</span>
+          </label>
+          <button id="addNodeBtn" class="primary">Add Node</button>
+          <button id="saveBtn" class="primary">Save Proposed</button>
+          <button id="copyCurrentBtn" class="ghost">Copy Current -> Proposed</button>
+          <button id="resetBtn" class="danger">Reset Proposed</button>
+          <button id="exportBtn" class="ghost">Copy JSON</button>
+        </div>
+      </header>
+
+      <section class="status-row">
+        <span id="statusPill" class="status">Ready</span>
+        <span id="activeSlot" class="slot">Mode: proposed</span>
+        <span id="storagePath" class="storage">Storage: unknown</span>
+      </section>
+
+      <main class="workspace">
+        <section class="canvas-wrap">
+          <button id="fullscreenBtn" class="canvas-fs-btn" type="button" aria-label="Enter canvas fullscreen" title="Enter canvas fullscreen">
+            <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+              <path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"></path>
+            </svg>
+          </button>
+          <div id="drawflow"></div>
+        </section>
+
+        <aside class="panel panel-right">
+          <h2>Node Inspector</h2>
+          <label>
+            Node ID
+            <input id="nodeId" type="text" readonly />
+          </label>
+          <label>
+            Label
+            <input id="nodeLabel" type="text" />
+          </label>
+          <label>
+            Type (auto)
+            <input id="nodeTypeDisplay" type="text" readonly />
+          </label>
+          <label>
+            Description
+            <textarea id="nodeDescription" rows="5"></textarea>
+          </label>
+          <button id="applyNodeBtn">Apply Node Changes</button>
+          <button id="deleteNodeBtn" class="danger">Delete Selected</button>
+          <div class="help-box">
+            <strong>How to connect:</strong>
+            <p>Drag from a node output circle to another node input circle.</p>
+          </div>
+        </aside>
+      </main>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/drawflow/dist/drawflow.min.js"></script>
+    <script src="/ui/flow/app.js"></script>
+  </body>
+</html>
