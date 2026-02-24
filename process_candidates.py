@@ -1,4 +1,5 @@
 import argparse
+import gc
 import glob
 import hashlib
 import json
@@ -750,6 +751,8 @@ def deduplicate_csv(input_csv: str, output_csv: str) -> pd.DataFrame:
     dedup_df.drop(columns=[c for c in cols_to_drop if c in dedup_df.columns], inplace=True)
     dedup_df = reorder_columns(dedup_df, BASE_CSV_FIRST_COLUMNS)
     dedup_df.to_csv(output_csv, index=False)
+    del df  # Free the original (larger) DataFrame
+    gc.collect()
     return dedup_df
 
 
@@ -1074,8 +1077,11 @@ def run_pipeline_from_jd_text(
     print(f"Loaded {len(widening_prompts)} JD-widening prompts.")
 
     all_queries: List[str] = []
-    all_rows: List[Dict[str, Any]] = []
+    batch_csv_paths: List[str] = []
     total_exa_results = 0
+    total_csv_rows = 0
+    batch_dir = os.path.join(os.path.dirname(args.candidates_csv), "exa-batches")
+    os.makedirs(batch_dir, exist_ok=True)
     total_query_gen_usage: Dict[str, int] = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
 
     for wp_idx, (wp_name, wp_text) in enumerate(widening_prompts, start=1):
@@ -1102,7 +1108,7 @@ def run_pipeline_from_jd_text(
         print(f"  Generated {len(queries)} exa queries for '{wp_name}'.")
         all_queries.extend(queries)
 
-        # Run Exa searches for this batch and flatten immediately to reduce peak memory.
+        # Run Exa searches for this batch, flatten, and write to a temp CSV immediately.
         batch_result = run_exa_fanout(
             exa_api_key=exa_api_key,
             queries=queries,
@@ -1112,13 +1118,17 @@ def run_pipeline_from_jd_text(
         total_exa_results += len(batch_items)
 
         batch_rows = flatten_exa_results_to_rows(batch_items)
-        all_rows.extend(batch_rows)
-        print(f"  Exa batch: {len(batch_items)} results -> {len(batch_rows)} rows ({len(all_rows)} total)")
+        batch_csv = os.path.join(batch_dir, f"batch-{wp_idx}.csv")
+        pd.DataFrame(batch_rows).to_csv(batch_csv, index=False)
+        batch_csv_paths.append(batch_csv)
+        total_csv_rows += len(batch_rows)
+        print(f"  Exa batch: {len(batch_items)} results -> {len(batch_rows)} rows (written to disk, {total_csv_rows} total)")
 
-        # Free raw Exa results before the next batch.
+        # Free all batch data before the next iteration.
         del batch_result, batch_items, batch_rows
+        gc.collect()
 
-    print(f"\nTotal exa queries: {len(all_queries)}, total rows: {len(all_rows)}")
+    print(f"\nTotal exa queries: {len(all_queries)}, total rows: {total_csv_rows}")
 
     logs_dir = args.debug_dir if args.debug else os.path.join(os.path.dirname(args.jd_path), "logs")
     queries_log_path = write_queries_log_file(logs_dir, all_queries)
@@ -1129,13 +1139,24 @@ def run_pipeline_from_jd_text(
     maybe_stop(args.stop_after, "exa_search")
 
     debug_pause(args.debug, "csv")
-    csv_df = write_results_csv(args.candidates_csv, all_rows)
-    del all_rows  # Free flattened rows now that they are written to CSV
+    # Combine batch CSVs into the final candidates CSV (only one DataFrame in memory).
+    csv_df = pd.concat(
+        [pd.read_csv(p) for p in batch_csv_paths],
+        ignore_index=True,
+    )
+    csv_df = reorder_columns(csv_df, BASE_CSV_FIRST_COLUMNS)
+    csv_df.to_csv(args.candidates_csv, index=False)
+    rows_before_dedup = len(csv_df)
+    del csv_df  # Free before dedup reads the same data from disk
+    gc.collect()
 
     maybe_stop(args.stop_after, "csv")
 
     debug_pause(args.debug, "dedup")
     dedup_df = deduplicate_csv(args.candidates_csv, args.dedup_csv)
+    rows_after_dedup = len(dedup_df)
+    del dedup_df  # Free before scoring reads the dedup CSV from disk
+    gc.collect()
 
     maybe_stop(args.stop_after, "dedup")
 
@@ -1174,14 +1195,19 @@ def run_pipeline_from_jd_text(
         sheet_ready_csv = f"{args.scored_csv[:-4]}-sheet-ready.csv"
     else:
         sheet_ready_csv = f"{args.scored_csv}-sheet-ready.csv"
+
+    # Drop the heavy raw_json column before writing the sheet-ready CSV.
+    if "raw_json" in scored_df.columns:
+        scored_df.drop(columns=["raw_json"], inplace=True)
     write_sheet_ready_csv(sheet_ready_csv, scored_df)
 
+    rows_scored = len(scored_df)
     total_input_tokens = int(total_query_gen_usage.get("input_tokens", 0)) + int(scoring_usage.get("input_tokens", 0))
     total_output_tokens = int(total_query_gen_usage.get("output_tokens", 0)) + int(scoring_usage.get("output_tokens", 0))
     used_assumptions = False
     if total_input_tokens == 0 and total_output_tokens == 0:
         used_assumptions = True
-        estimated_candidates = max(1, len(scored_df))
+        estimated_candidates = max(1, rows_scored)
         total_input_tokens = 2000 + (estimated_candidates * 2000)
         total_output_tokens = 3500 + (estimated_candidates * 120)
 
@@ -1190,14 +1216,17 @@ def run_pipeline_from_jd_text(
         exa_pages_count=total_exa_results,
         openai_input_tokens=total_input_tokens,
         openai_output_tokens=total_output_tokens,
-        scored_count=len(scored_df),
+        scored_count=rows_scored,
         used_assumptions=used_assumptions,
     )
 
+    del scored_df  # Free before Slack upload
+    gc.collect()
+
     elapsed = time.monotonic() - pipeline_start
     upload_comment = (
-        f"AI-scored candidates CSV for this JD ({len(scored_df)} scored, "
-        f"{len(dedup_df)} after dedup from {len(csv_df)} fetched). "
+        f"AI-scored candidates CSV for this JD ({rows_scored} scored, "
+        f"{rows_after_dedup} after dedup from {rows_before_dedup} fetched). "
         f"Est. cost/candidate: ${cost_summary['per_scored_candidate']:.4f}. "
         f"Total time: {format_eta_seconds(elapsed)}."
     )
@@ -1214,9 +1243,9 @@ def run_pipeline_from_jd_text(
     return {
         "queries_count": len(all_queries),
         "total_results": total_exa_results,
-        "rows_before_dedup": int(len(csv_df)),
-        "rows_after_dedup": int(len(dedup_df)),
-        "rows_scored": int(len(scored_df)),
+        "rows_before_dedup": rows_before_dedup,
+        "rows_after_dedup": rows_after_dedup,
+        "rows_scored": rows_scored,
         "uploaded_file_id": file_id,
         "sheet_ready_csv": sheet_ready_csv,
         "queries_log_path": queries_log_path,
