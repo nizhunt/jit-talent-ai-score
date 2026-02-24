@@ -8,7 +8,7 @@ from openai import OpenAI
 from rq import Worker
 
 from process_candidates import parse_args, post_slack_message, run_pipeline_from_jd_text
-from queueing import get_queue_name, get_redis_connection
+from queueing import clear_event_seen, get_queue_name, get_redis_connection
 
 
 def require_env(name: str) -> str:
@@ -48,6 +48,27 @@ def build_pipeline_args(channel_id: str) -> argparse.Namespace:
     return args
 
 
+def _notify_failure(channel_id: str, error_msg: str, event_id: Optional[str] = None) -> None:
+    """Best-effort: post failure to Slack and clear event dedup so JD can be retried."""
+    try:
+        slack_token = os.getenv("SLACK_BOT_TOKEN") or os.getenv("SLACK_USER_TOKEN")
+        if slack_token and channel_id:
+            short_error = (error_msg[:300] + "...") if len(error_msg) > 300 else error_msg
+            post_slack_message(
+                slack_token=slack_token,
+                channel_id=channel_id,
+                text=f"⚠️ Pipeline failed: {short_error}\nPlease re-post the JD to retry.",
+            )
+    except Exception as exc:
+        print(f"[warn] failed to post failure message to Slack: {exc}")
+
+    if event_id:
+        try:
+            clear_event_seen(event_id)
+        except Exception as exc:
+            print(f"[warn] failed to clear event dedup marker: {exc}")
+
+
 def process_jd_pipeline_job(
     *,
     jd_text: str,
@@ -68,16 +89,20 @@ def process_jd_pipeline_job(
         text="Thanks for sharing the JD. Processing has started.",
     )
 
-    client = OpenAI(api_key=openai_api_key)
-    args = build_pipeline_args(channel_id=channel_id)
-    result = run_pipeline_from_jd_text(
-        jd_text=jd_text,
-        args=args,
-        client=client,
-        exa_api_key=exa_api_key,
-        slack_token=slack_token,
-    )
-    return {"ok": True, "event_id": event_id, "result": result}
+    try:
+        client = OpenAI(api_key=openai_api_key)
+        args = build_pipeline_args(channel_id=channel_id)
+        result = run_pipeline_from_jd_text(
+            jd_text=jd_text,
+            args=args,
+            client=client,
+            exa_api_key=exa_api_key,
+            slack_token=slack_token,
+        )
+        return {"ok": True, "event_id": event_id, "result": result}
+    except Exception as exc:
+        _notify_failure(channel_id=channel_id, error_msg=str(exc), event_id=event_id)
+        raise  # Re-raise so RQ marks the job as failed
 
 
 def parse_worker_args() -> argparse.Namespace:
