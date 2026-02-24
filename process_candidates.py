@@ -46,6 +46,7 @@ BASE_CSV_FIRST_COLUMNS = [
     "current_title",
     "current_company",
     "text",
+    "expansion_prompt_file",
 ]
 SCORED_CSV_FIRST_COLUMNS = ["ai-score", "ai-reason", "ai-email"]
 SHEET_COLUMN_LABEL_OVERRIDES = {
@@ -151,17 +152,18 @@ def write_text_file(path: str, content: str) -> None:
         f.write(content)
 
 
-def load_widening_prompts(prompts_dir: str) -> List[Tuple[str, str]]:
+def load_widening_prompts(prompts_dir: str) -> List[Tuple[str, str, str]]:
     """Load all JD-widening prompt files from the given directory, sorted by filename."""
     pattern = os.path.join(prompts_dir, "*.md")
     files = sorted(glob.glob(pattern))
     if not files:
         raise RuntimeError(f"No widening prompt files found in {prompts_dir}")
-    prompts: List[Tuple[str, str]] = []
+    prompts: List[Tuple[str, str, str]] = []
     for filepath in files:
+        filename = os.path.basename(filepath)
         name = os.path.splitext(os.path.basename(filepath))[0]
         text = read_text_file(filepath)
-        prompts.append((name, text))
+        prompts.append((name, text, filename))
     return prompts
 
 
@@ -621,7 +623,10 @@ def flatten_string_list(row: Dict[str, Any], values: List[Any], prefix: str) -> 
         row[f"{prefix}_{idx}"] = value
 
 
-def flatten_exa_results_to_rows(results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def flatten_exa_results_to_rows(
+    results: List[Dict[str, Any]],
+    expansion_prompt_file: str = "",
+) -> List[Dict[str, Any]]:
     rows: List[Dict[str, Any]] = []
 
     for item in results:
@@ -654,6 +659,7 @@ def flatten_exa_results_to_rows(results: List[Dict[str, Any]]) -> List[Dict[str,
         row = {
             "source_query_index": item.get("_source_query_index"),
             "source_query": item.get("_source_query"),
+            "expansion_prompt_file": expansion_prompt_file,
             "id": normalize_whitespace(item.get("id")),
             "entity_id": normalize_whitespace(item.get("entityId")),
             "entity_type": normalize_whitespace(item.get("entityType")),
@@ -1128,7 +1134,7 @@ def run_pipeline_from_jd_text(
     os.makedirs(batch_dir, exist_ok=True)
     total_query_gen_usage: Dict[str, int] = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
 
-    for wp_idx, (wp_name, wp_text) in enumerate(widening_prompts, start=1):
+    for wp_idx, (wp_name, wp_text, wp_filename) in enumerate(widening_prompts, start=1):
         print(f"\n[{wp_idx}/{len(widening_prompts)}] Widening JD with '{wp_name}'...")
         profile, widen_usage = widen_jd(
             client=client,
@@ -1161,7 +1167,10 @@ def run_pipeline_from_jd_text(
         batch_items = batch_result.get("results", [])
         total_exa_results += len(batch_items)
 
-        batch_rows = flatten_exa_results_to_rows(batch_items)
+        batch_rows = flatten_exa_results_to_rows(
+            batch_items,
+            expansion_prompt_file=wp_filename,
+        )
         batch_csv = os.path.join(batch_dir, f"batch-{wp_idx}.csv")
         pd.DataFrame(batch_rows).to_csv(batch_csv, index=False)
         batch_csv_paths.append(batch_csv)
