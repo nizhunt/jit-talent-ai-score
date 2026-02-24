@@ -40,7 +40,6 @@ def build_pipeline_args(channel_id: str) -> argparse.Namespace:
     os.makedirs(run_dir, exist_ok=True)
 
     args.jd_path = os.path.join(run_dir, "jd.md")
-    args.results_json = os.path.join(run_dir, "exa-results.json")
     args.candidates_csv = os.path.join(run_dir, "candidates.csv")
     args.dedup_csv = os.path.join(run_dir, "candidates-dedup.csv")
     args.scored_csv = os.path.join(run_dir, "candidates-scored.csv")

@@ -687,11 +687,6 @@ def flatten_exa_results_to_rows(results: List[Dict[str, Any]]) -> List[Dict[str,
     return rows
 
 
-def write_consolidated_json(path: str, payload: Dict[str, Any]) -> None:
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(payload, f, ensure_ascii=False, indent=2)
-
-
 def reorder_columns(df: pd.DataFrame, first_columns: List[str]) -> pd.DataFrame:
     ordered_first = [col for col in first_columns if col in df.columns]
     remaining = [col for col in df.columns if col not in ordered_first]
@@ -730,13 +725,6 @@ def write_sheet_ready_csv(path: str, df: pd.DataFrame) -> pd.DataFrame:
     sheet_df = df.rename(columns=rename_map)
     sheet_df.to_csv(path, index=False)
     return sheet_df
-
-
-def write_results_csv(path: str, rows: List[Dict[str, Any]]) -> pd.DataFrame:
-    df = pd.DataFrame(rows)
-    df = reorder_columns(df, BASE_CSV_FIRST_COLUMNS)
-    df.to_csv(path, index=False)
-    return df
 
 
 def deduplicate_csv(input_csv: str, output_csv: str) -> pd.DataFrame:
@@ -987,16 +975,15 @@ def compute_cost_summary(
     }
 
 
-def upload_file_to_slack(
+def upload_csv_to_slack(
     slack_token: str,
     channel_id: str,
-    file_path: str,
+    csv_path: str,
     initial_comment: str,
-    content_type: str,
 ) -> Dict[str, Any]:
     headers = {"Authorization": f"Bearer {slack_token}"}
-    filename = os.path.basename(file_path)
-    file_size = os.path.getsize(file_path)
+    filename = os.path.basename(csv_path)
+    file_size = os.path.getsize(csv_path)
 
     # Step 1: ask Slack for an external upload URL.
     get_upload_resp = requests.post(
@@ -1019,10 +1006,10 @@ def upload_file_to_slack(
         raise RuntimeError("Slack getUploadURLExternal returned missing upload_url or file_id.")
 
     # Step 2: upload file bytes to the pre-signed URL.
-    with open(file_path, "rb") as f:
+    with open(csv_path, "rb") as f:
         upload_resp = requests.post(
             upload_url,
-            files={"file": (filename, f, content_type)},
+            files={"file": (filename, f, "text/csv")},
             timeout=120,
         )
     upload_resp.raise_for_status()
@@ -1052,19 +1039,16 @@ def upload_file_to_slack(
     return complete_payload
 
 
-def upload_csv_to_slack(
-    slack_token: str,
-    channel_id: str,
-    csv_path: str,
-    initial_comment: str,
-) -> Dict[str, Any]:
-    return upload_file_to_slack(
-        slack_token=slack_token,
-        channel_id=channel_id,
-        file_path=csv_path,
-        initial_comment=initial_comment,
-        content_type="text/csv",
-    )
+def build_score_tally_lines(scored_df: pd.DataFrame) -> List[str]:
+    if "ai-score" not in scored_df.columns:
+        return []
+
+    numeric_scores = pd.to_numeric(scored_df["ai-score"], errors="coerce").dropna()
+    if numeric_scores.empty:
+        return []
+
+    tally = numeric_scores.astype(int).value_counts().sort_index(ascending=False)
+    return [f"  Score {int(score_val)}: {int(count)}" for score_val, count in tally.items()]
 
 
 def format_eta_seconds(eta_seconds: float) -> str:
@@ -1281,13 +1265,7 @@ def run_pipeline_from_jd_text(
     )
 
     # Build score tally before freeing the DataFrame.
-    score_tally_lines: List[str] = []
-    if "ai-score" in scored_df.columns:
-        tally = scored_df["ai-score"].apply(
-            lambda v: int(v) if str(v).strip().lstrip("-").isdigit() else None
-        ).dropna().astype(int).value_counts().sort_index(ascending=False)
-        for score_val, count in tally.items():
-            score_tally_lines.append(f"  Score {score_val}: {count}")
+    score_tally_lines = build_score_tally_lines(scored_df)
 
     del scored_df  # Free before Slack upload
     gc.collect()
@@ -1339,7 +1317,6 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument("--scorer-prompt-path", default="prompts/scorer_prompt.md")
     parser.add_argument("--jd-widening-prompts-dir", default="prompts/jd-widening-prompts")
 
-    parser.add_argument("--results-json", default="exa-results.json")
     parser.add_argument("--candidates-csv", default="candidates.csv")
     parser.add_argument("--dedup-csv", default="candidates-dedup.csv")
     parser.add_argument("--scored-csv", default="candidates-scored.csv")
