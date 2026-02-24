@@ -1,5 +1,6 @@
 import argparse
 import os
+import shutil
 import uuid
 from typing import Any, Dict, Optional
 
@@ -38,6 +39,7 @@ def build_pipeline_args(channel_id: str) -> argparse.Namespace:
     run_id = uuid.uuid4().hex[:12]
     run_dir = os.path.join("/tmp", f"jit-talent-worker-{run_id}")
     os.makedirs(run_dir, exist_ok=True)
+    args.run_dir = run_dir
 
     args.jd_path = os.path.join(run_dir, "jd.md")
     args.candidates_csv = os.path.join(run_dir, "candidates.csv")
@@ -45,6 +47,17 @@ def build_pipeline_args(channel_id: str) -> argparse.Namespace:
     args.scored_csv = os.path.join(run_dir, "candidates-scored.csv")
     args.debug_dir = os.path.join(run_dir, "debug")
     return args
+
+
+def cleanup_run_dir(run_dir: Optional[str]) -> None:
+    if not run_dir:
+        return
+    try:
+        shutil.rmtree(run_dir)
+    except FileNotFoundError:
+        return
+    except Exception as exc:
+        print(f"[warn] failed to clean up run dir '{run_dir}': {exc}")
 
 
 def _notify_failure(channel_id: str, error_msg: str, event_id: Optional[str] = None) -> None:
@@ -77,6 +90,7 @@ def process_jd_pipeline_job(
 ) -> Dict[str, Any]:
     load_dotenv()
     _ = message_ts  # reserved for compatibility with existing enqueued payloads
+    run_dir: Optional[str] = None
 
     openai_api_key = require_env("OPENAI_API_KEY")
     exa_api_key = require_env("EXA_API_KEY")
@@ -91,6 +105,7 @@ def process_jd_pipeline_job(
     try:
         client = OpenAI(api_key=openai_api_key)
         args = build_pipeline_args(channel_id=channel_id)
+        run_dir = getattr(args, "run_dir", None)
         result = run_pipeline_from_jd_text(
             jd_text=jd_text,
             args=args,
@@ -102,6 +117,8 @@ def process_jd_pipeline_job(
     except Exception as exc:
         _notify_failure(channel_id=channel_id, error_msg=str(exc), event_id=event_id)
         raise  # Re-raise so RQ marks the job as failed
+    finally:
+        cleanup_run_dir(run_dir)
 
 
 def parse_worker_args() -> argparse.Namespace:

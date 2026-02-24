@@ -38,6 +38,9 @@ Optional:
 - `SLACK_EVENT_DEDUP_ENABLED` (default `true`)
 - `SLACK_EVENT_DEDUP_FAIL_OPEN` (default `true`)
 - `SLACK_ACK_QUEUE_UNAVAILABLE` (default `true`; returns `200` degraded responses to Slack when Redis is unavailable)
+- `EXA_CONCURRENT_SEARCHES` (default `5`)
+- `SCORING_CONCURRENT_CALLS` (default `24`)
+- `SCORING_MAX_INFLIGHT_FACTOR` (default `2`; max in-flight scoring futures = `SCORING_CONCURRENT_CALLS * factor`)
 - `SCORE_PROGRESS_NOTIFY_EVERY` (default `50`)
 - `SCORE_INITIAL_SECONDS_PER_CANDIDATE` (default `2.5`)
 
@@ -153,6 +156,6 @@ Persistence:
 
 ## Notes
 
-- Pipeline outputs are written under `/tmp` in worker runs.
+- Pipeline outputs are written under `/tmp` in worker runs and cleaned up after each job.
 - Step updates are posted to Slack at each stage completion.
 - The 15 generated Exa prompts are uploaded to Slack as a `.txt` file per run.
