@@ -110,11 +110,11 @@ Provide three fields: **Score**, **Reasoning**, and **Email**.
 Use the reasoning above to determine the email content. Emails are from Callum, co-founder at Calyptus. Keep all emails short and conversational (under 100 words). No subject line needed unless specified.
 
 - **Score 8-9:**
-    
+
 
 > Hi [First Name],
 > 
-> I came across your profile and think you could be a great match for [role title] at [company from JD]. [1-2 sentences summarising what the role involves, drawn from the JD.]
+> I came across your profile and think you could be a great match for [role title] at our client. [1-2 sentences summarising what the role involves, drawn from the JD.]
 > 
 > If this sounds interesting, just reply with your resume and we can take it from there.
 > 
@@ -122,11 +122,11 @@ Use the reasoning above to determine the email content. Emails are from Callum, 
 > Co-founder, Calyptus
 
 - **Score 4-7:**
-    
+
 
 > Hi [First Name],
 > 
-> I came across your profile and think you could be a potential match for [role title] at [company from JD]. [1-2 sentences summarising what the role involves, drawn from the JD.]
+> I came across your profile and think you could be a potential match for a [role title] at our client. [1-2 sentences summarising what the role involves, drawn from the JD.]
 > 
 > Before we proceed, we'd love some clarification on a few things: [Insert 2-3 short, specific questions directly based on the gaps or concerns flagged in your Reasoning above. E.g., "Are you open to relocation to X?", "Do you have hands-on experience with Y?", "Can you tell us more about the gap between Z roles?"]
 > 
@@ -136,10 +136,9 @@ Use the reasoning above to determine the email content. Emails are from Callum, 
 > Co-founder, Calyptus
 
 - **Score 0-3:** _(Leave blank)_
-    
+
 
 ---
-
 (LinkedIn): [PASTE LINKEDIN DATA]
 
 Job Description: [PASTE JD TEXT]

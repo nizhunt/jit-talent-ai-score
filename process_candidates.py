@@ -34,7 +34,7 @@ STAGES = ["fetch_jd", "generate_queries", "exa_search", "csv", "dedup", "score",
 
 # Conservative concurrency limits (well under API rate caps).
 EXA_CONCURRENT_SEARCHES = 5   # Exa limit: 10 QPS
-SCORING_CONCURRENT_CALLS = 50  # OpenAI Tier 3+: 5,000 RPM
+SCORING_CONCURRENT_CALLS = 100  # gpt-5-mini: 30,000 RPM
 
 BASE_CSV_FIRST_COLUMNS = [
     "first_name",
@@ -1280,15 +1280,27 @@ def run_pipeline_from_jd_text(
         used_assumptions=used_assumptions,
     )
 
+    # Build score tally before freeing the DataFrame.
+    score_tally_lines: List[str] = []
+    if "ai-score" in scored_df.columns:
+        tally = scored_df["ai-score"].apply(
+            lambda v: int(v) if str(v).strip().lstrip("-").isdigit() else None
+        ).dropna().astype(int).value_counts().sort_index(ascending=False)
+        for score_val, count in tally.items():
+            score_tally_lines.append(f"  Score {score_val}: {count}")
+
     del scored_df  # Free before Slack upload
     gc.collect()
 
     elapsed = time.monotonic() - pipeline_start
+    tally_block = "\n".join(score_tally_lines) if score_tally_lines else "  (no scores)"
     upload_comment = (
-        f"AI-scored candidates CSV for this JD ({rows_scored} scored, "
-        f"{rows_after_dedup} after dedup from {rows_before_dedup} fetched). "
-        f"Est. cost/candidate: ${cost_summary['per_scored_candidate']:.4f}. "
-        f"Total time: {format_eta_seconds(elapsed)}."
+        f"AI-scored candidates CSV for this JD\n"
+        f"Scored: {rows_scored}\n"
+        f"After dedup: {rows_after_dedup} (from {rows_before_dedup} fetched)\n"
+        f"Est. cost/candidate: ${cost_summary['per_scored_candidate']:.4f}\n"
+        f"Total time: {format_eta_seconds(elapsed)}\n\n"
+        f"Score Tally:\n{tally_block}"
     )
     slack_upload = upload_csv_to_slack(
         slack_token=slack_token,
@@ -1318,8 +1330,8 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument("--channel-id", default=CHANNEL_ID_DEFAULT)
     parser.add_argument("--debug", action="store_true", help="Enable debug logs and step-by-step prompt")
     parser.add_argument("--stop-after", choices=STAGES, default=None)
-    parser.add_argument("--model", default="gpt-4o-mini", help="Model for JD widening and query generation")
-    parser.add_argument("--scorer-model", default="gpt-4o-mini", help="Model for candidate scoring (supports structured output)")
+    parser.add_argument("--model", default="gpt-5-mini", help="Model for JD widening and query generation")
+    parser.add_argument("--scorer-model", default="gpt-5-mini", help="Model for candidate scoring (supports structured output)")
     parser.add_argument("--max-messages", type=int, default=500)
 
     parser.add_argument("--jd-path", default="jd.md")
