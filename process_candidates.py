@@ -275,7 +275,7 @@ def generate_exa_queries(
             {"role": "user", "content": prompt},
         ],
         temperature=0.4,
-        max_tokens=4096,
+        max_tokens=16384,
         response_format=QUERY_RESPONSE_SCHEMA,
     )
 
