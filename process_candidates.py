@@ -275,8 +275,16 @@ def generate_exa_queries(
             {"role": "user", "content": prompt},
         ],
         temperature=0.4,
+        max_tokens=4096,
         response_format=QUERY_RESPONSE_SCHEMA,
     )
+
+    finish_reason = getattr(response.choices[0], "finish_reason", None)
+    if finish_reason == "length":
+        raise RuntimeError(
+            "OpenAI response truncated (finish_reason='length') during query generation. "
+            "The structured profile may be too long."
+        )
 
     raw = (response.choices[0].message.content or "").strip()
     data = json.loads(raw)
@@ -1145,7 +1153,7 @@ def run_pipeline_from_jd_text(
         output_csv=args.scored_csv,
         jd_text=jd_text,
         scorer_prompt_template=scorer_prompt_template,
-        model=args.model,
+        model=args.scorer_model,
         progress_callback=on_score_progress,
     )
 
@@ -1209,7 +1217,8 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument("--channel-id", default=CHANNEL_ID_DEFAULT)
     parser.add_argument("--debug", action="store_true", help="Enable debug logs and step-by-step prompt")
     parser.add_argument("--stop-after", choices=STAGES, default=None)
-    parser.add_argument("--model", default="gpt-4o-mini")
+    parser.add_argument("--model", default="gpt-4o-mini", help="Model for JD widening and query generation")
+    parser.add_argument("--scorer-model", default="gpt-4o", help="Model for candidate scoring (supports structured output)")
     parser.add_argument("--max-messages", type=int, default=500)
 
     parser.add_argument("--jd-path", default="jd.md")
