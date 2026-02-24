@@ -5,7 +5,9 @@ import hashlib
 import json
 import os
 import re
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional, Tuple
 from urllib.parse import urlsplit
@@ -28,15 +30,11 @@ SLACK_POST_MESSAGE_URL = "https://slack.com/api/chat.postMessage"
 SLACK_GET_UPLOAD_URL_EXTERNAL = "https://slack.com/api/files.getUploadURLExternal"
 SLACK_COMPLETE_UPLOAD_EXTERNAL = "https://slack.com/api/files.completeUploadExternal"
 
-STAGES = [
-    "fetch_jd",
-    "generate_queries",
-    "exa_search",
-    "csv",
-    "dedup",
-    "score",
-    "post",
-]
+STAGES = ["fetch_jd", "generate_queries", "exa_search", "csv", "dedup", "score", "post"]
+
+# Conservative concurrency limits (well under API rate caps).
+EXA_CONCURRENT_SEARCHES = 5   # Exa limit: 10 QPS
+SCORING_CONCURRENT_CALLS = 50  # OpenAI Tier 3+: 5,000 RPM
 
 BASE_CSV_FIRST_COLUMNS = [
     "first_name",
@@ -396,9 +394,10 @@ def run_exa_fanout(
 
     exa = Exa(exa_api_key)
     all_items: List[Dict[str, Any]] = []
-    query_summaries: List[Dict[str, Any]] = []
+    query_summaries: List[Dict[str, Any]] = [None] * len(queries)  # preserve order
+    lock = threading.Lock()
 
-    for idx, query in enumerate(queries, start=1):
+    def _search_one(idx: int, query: str) -> None:
         result = exa_search_one(
             exa=exa,
             query=query,
@@ -414,16 +413,23 @@ def run_exa_fanout(
         for item in items:
             item["_source_query_index"] = idx
             item["_source_query"] = query
-            all_items.append(item)
 
-        query_summaries.append(
-            {
+        with lock:
+            all_items.extend(items)
+            query_summaries[idx - 1] = {
                 "query_index": idx,
                 "query": query,
                 "result_count": len(items),
             }
-        )
         print(f"Exa query {idx}/{len(queries)}: received {len(items)} results")
+
+    with ThreadPoolExecutor(max_workers=EXA_CONCURRENT_SEARCHES) as executor:
+        futures = [
+            executor.submit(_search_one, idx, query)
+            for idx, query in enumerate(queries, start=1)
+        ]
+        for future in as_completed(futures):
+            future.result()  # Raise any exceptions
 
     return {
         "fetched_at": datetime.utcnow().isoformat() + "Z",
@@ -863,7 +869,7 @@ def score_candidates_csv(
 
     pending = df["ai-score"].isna()
     pending_count = int(pending.sum())
-    print(f"Scoring {pending_count} candidates...")
+    print(f"Scoring {pending_count} candidates ({SCORING_CONCURRENT_CALLS} concurrent)...")
 
     # Fixed milestones: notify at 25%, 50%, 75% only (3 progress updates).
     milestone_pcts = [25, 50, 75]
@@ -873,18 +879,23 @@ def score_candidates_csv(
         if 0 < threshold < pending_count:
             milestone_thresholds.add(threshold)
 
-    progress = tqdm(total=pending_count, desc="Scoring", unit="candidate")
-    started_at = time.monotonic()
-    usage_totals = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
-
+    # Pre-extract candidate text so worker threads don't touch the DataFrame.
+    pending_texts: Dict[int, str] = {}
     for idx in df.index:
         if not pending[idx]:
             continue
-
         text = normalize_whitespace(df.at[idx, "text"]) if "text" in df.columns else ""
         if not text and "raw_json" in df.columns:
             text = normalize_whitespace(df.at[idx, "raw_json"])
+        pending_texts[idx] = text
 
+    progress = tqdm(total=pending_count, desc="Scoring", unit="candidate")
+    started_at = time.monotonic()
+    usage_totals = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+    lock = threading.Lock()
+    completed_count = 0
+
+    def _score_one(idx: int, text: str) -> Tuple[int, Any, str, str, Dict[str, int]]:
         score, reason, email, usage = get_ai_score(
             client=client,
             candidate_text=text,
@@ -892,35 +903,48 @@ def score_candidates_csv(
             scorer_prompt_template=scorer_prompt_template,
             model=model,
         )
-        usage_totals["input_tokens"] += int(usage.get("input_tokens", 0))
-        usage_totals["output_tokens"] += int(usage.get("output_tokens", 0))
-        usage_totals["total_tokens"] += int(usage.get("total_tokens", 0))
+        return idx, score, reason, email, usage
 
-        df.at[idx, "ai-score"] = score
-        df.at[idx, "ai-reason"] = reason
-        df.at[idx, "ai-email"] = email
-        progress.update(1)
+    with ThreadPoolExecutor(max_workers=SCORING_CONCURRENT_CALLS) as executor:
+        futures = [
+            executor.submit(_score_one, idx, text)
+            for idx, text in pending_texts.items()
+        ]
 
-        processed = int(progress.n)
-        if processed > 0 and progress_callback is not None and processed in milestone_thresholds:
-            elapsed = time.monotonic() - started_at
-            seconds_per_candidate = elapsed / processed
-            remaining = max(0, pending_count - processed)
-            eta_seconds = remaining * seconds_per_candidate
-            pct = processed / pending_count * 100.0
-            progress_callback(
-                {
-                    "event": "progress",
-                    "processed": processed,
-                    "pending_count": pending_count,
-                    "seconds_per_candidate": seconds_per_candidate,
-                    "eta_seconds": eta_seconds,
-                    "pct": pct,
-                }
-            )
+        for future in as_completed(futures):
+            idx, score, reason, email, usage = future.result()
 
-        if (progress.n % 10) == 0:
-            reorder_columns(df, SCORED_CSV_FIRST_COLUMNS).to_csv(output_csv, index=False)
+            with lock:
+                usage_totals["input_tokens"] += int(usage.get("input_tokens", 0))
+                usage_totals["output_tokens"] += int(usage.get("output_tokens", 0))
+                usage_totals["total_tokens"] += int(usage.get("total_tokens", 0))
+
+                df.at[idx, "ai-score"] = score
+                df.at[idx, "ai-reason"] = reason
+                df.at[idx, "ai-email"] = email
+                progress.update(1)
+                completed_count += 1
+
+                processed = completed_count
+                if processed > 0 and progress_callback is not None and processed in milestone_thresholds:
+                    elapsed = time.monotonic() - started_at
+                    seconds_per_candidate = elapsed / processed
+                    remaining = max(0, pending_count - processed)
+                    eta_seconds = remaining * seconds_per_candidate
+                    pct = processed / pending_count * 100.0
+                    progress_callback(
+                        {
+                            "event": "progress",
+                            "processed": processed,
+                            "pending_count": pending_count,
+                            "seconds_per_candidate": seconds_per_candidate,
+                            "eta_seconds": eta_seconds,
+                            "pct": pct,
+                        }
+                    )
+
+                if (completed_count % 10) == 0:
+                    reorder_columns(df, SCORED_CSV_FIRST_COLUMNS).to_csv(output_csv, index=False)
 
     progress.close()
     df = reorder_columns(df, SCORED_CSV_FIRST_COLUMNS)

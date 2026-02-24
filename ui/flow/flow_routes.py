@@ -111,10 +111,27 @@ def _default_flow_definition() -> Dict[str, Any]:
                 "y": 320,
             },
             {
+                "id": "notify_start",
+                "type": "action",
+                "label": "Notify Slack: Processing Started",
+                "description": (
+                    "Posts 'Thanks for sharing the JD. Processing has started.' "
+                    "to the Slack channel before the pipeline begins."
+                ),
+                "status": "current",
+                "x": 1820,
+                "y": 320,
+            },
+            {
                 "id": "widen_jd",
                 "type": "action",
                 "label": "Widen JD (6 Meta Prompts)",
-                "description": "Runs 6 JD-widening prompts (original, wider-location, wider-titles, wider-yoe, wider-companies, lenient-skills) to produce 6 structured search profiles.",
+                "description": (
+                    "BATCH LOOP START — For each of the 6 JD-widening prompts "
+                    "(original, wider-location, wider-titles, wider-yoe, "
+                    "wider-companies, lenient-skills): applies the meta prompt "
+                    "to produce a structured search profile."
+                ),
                 "status": "current",
                 "x": 1820,
                 "y": 160,
@@ -122,8 +139,12 @@ def _default_flow_definition() -> Dict[str, Any]:
             {
                 "id": "generate_queries",
                 "type": "action",
-                "label": "Generate 60 Exa Queries (6×10)",
-                "description": "For each of the 6 widened profiles, OpenAI generates 10 Exa search queries. Total: 60 queries.",
+                "label": "Generate 10 Exa Queries (per batch)",
+                "description": (
+                    "Inside the batch loop: OpenAI generates 10 Exa search queries "
+                    "from the widened profile. Runs once per widening prompt "
+                    "(6 × 10 = 60 queries total)."
+                ),
                 "status": "current",
                 "x": 2120,
                 "y": 160,
@@ -131,8 +152,12 @@ def _default_flow_definition() -> Dict[str, Any]:
             {
                 "id": "exa_search",
                 "type": "action",
-                "label": "Run Exa Fanout Search",
-                "description": "Fetches up to 100 candidate profiles per query from Exa. Up to 6000 results total.",
+                "label": "Run Exa Fanout Search (per batch)",
+                "description": (
+                    "Inside the batch loop: fetches up to 100 candidate profiles "
+                    "per query from Exa. Each batch searches 10 queries "
+                    "(up to 1000 results per batch)."
+                ),
                 "status": "current",
                 "x": 2420,
                 "y": 160,
@@ -140,46 +165,86 @@ def _default_flow_definition() -> Dict[str, Any]:
             {
                 "id": "build_csv",
                 "type": "data",
-                "label": "Build Candidate CSV",
-                "description": "Flatten Exa results and write candidates.csv.",
+                "label": "Build Batch CSV",
+                "description": (
+                    "Inside the batch loop: flattens Exa results and writes a "
+                    "per-batch CSV to the exa-batches/ directory. BATCH LOOP END "
+                    "— repeats from Widen JD for next prompt."
+                ),
                 "status": "current",
                 "x": 2700,
+                "y": 160,
+            },
+            {
+                "id": "combine_batches",
+                "type": "data",
+                "label": "Combine Batch CSVs",
+                "description": (
+                    "After all 6 batches complete: concatenates all per-batch CSVs "
+                    "into the final candidates.csv. Frees batch data from memory."
+                ),
+                "status": "current",
+                "x": 2970,
                 "y": 160,
             },
             {
                 "id": "dedup_candidates",
                 "type": "action",
                 "label": "Deduplicate Candidates",
-                "description": "Dedupes by normalized LinkedIn/name/location signals.",
+                "description": (
+                    "Dedupes by normalized LinkedIn URL, profile URL, "
+                    "text hash, or name+location signals."
+                ),
                 "status": "current",
-                "x": 2970,
+                "x": 3240,
                 "y": 160,
             },
             {
                 "id": "score_candidates",
                 "type": "action",
                 "label": "Score Candidates with AI",
-                "description": "Applies scoring prompt, posts progress updates to Slack.",
+                "description": (
+                    "Applies scoring prompt to each candidate against the original JD. "
+                    "Posts progress updates to Slack at 25%, 50%, 75%."
+                ),
                 "status": "current",
-                "x": 3240,
+                "x": 3510,
+                "y": 160,
+            },
+            {
+                "id": "write_sheet_csv",
+                "type": "data",
+                "label": "Write Sheet-Ready CSV",
+                "description": (
+                    "Drops the raw_json column from the scored DataFrame "
+                    "and writes a clean sheet-ready CSV for sharing."
+                ),
+                "status": "current",
+                "x": 3780,
                 "y": 160,
             },
             {
                 "id": "upload_scored_csv",
                 "type": "output",
                 "label": "Upload Scored CSV to Slack",
-                "description": "Sends final scored file and summary updates to channel.",
+                "description": (
+                    "Uploads the sheet-ready CSV file to the Slack channel with "
+                    "a summary comment (rows scored, dedup stats, cost, time)."
+                ),
                 "status": "current",
-                "x": 3510,
+                "x": 4050,
                 "y": 160,
             },
             {
                 "id": "post_cost_summary",
                 "type": "output",
                 "label": "Post Cost Summary",
-                "description": "Computes and posts estimated per-candidate cost.",
+                "description": (
+                    "Computes and returns estimated per-candidate cost "
+                    "based on Exa and OpenAI usage."
+                ),
                 "status": "current",
-                "x": 3510,
+                "x": 4050,
                 "y": 360,
             },
         ],
@@ -189,20 +254,31 @@ def _default_flow_definition() -> Dict[str, Any]:
             {"id": "e3", "source": "validate_message", "target": "deduplicate_event", "label": "valid JD event"},
             {"id": "e4", "source": "deduplicate_event", "target": "enqueue_job", "label": "first delivery"},
             {"id": "e5", "source": "enqueue_job", "target": "worker_pickup", "label": "rq queue"},
-            {"id": "e6", "source": "worker_pickup", "target": "widen_jd", "label": "start worker flow"},
-            {"id": "e6b", "source": "widen_jd", "target": "generate_queries", "label": "6 structured profiles"},
-            {"id": "e7", "source": "generate_queries", "target": "exa_search", "label": "60 queries"},
-            {"id": "e8", "source": "exa_search", "target": "build_csv", "label": "~6000 results"},
-            {"id": "e9", "source": "build_csv", "target": "dedup_candidates", "label": "candidates.csv"},
-            {"id": "e10", "source": "dedup_candidates", "target": "score_candidates", "label": "dedup csv"},
-            {"id": "e11", "source": "score_candidates", "target": "upload_scored_csv", "label": "scored csv"},
-            {"id": "e12", "source": "score_candidates", "target": "post_cost_summary", "label": "token usage + costs"},
+            {"id": "e5b", "source": "worker_pickup", "target": "notify_start", "label": "start worker"},
+            {"id": "e6", "source": "notify_start", "target": "widen_jd", "label": "ack sent"},
+            {"id": "e6b", "source": "widen_jd", "target": "generate_queries", "label": "structured profile"},
+            {"id": "e7", "source": "generate_queries", "target": "exa_search", "label": "10 queries"},
+            {"id": "e8", "source": "exa_search", "target": "build_csv", "label": "~1000 results"},
+            {"id": "e8b", "source": "build_csv", "target": "widen_jd", "label": "next batch (loop ×6)"},
+            {"id": "e9", "source": "build_csv", "target": "combine_batches", "label": "all batches done"},
+            {"id": "e10", "source": "combine_batches", "target": "dedup_candidates", "label": "candidates.csv"},
+            {"id": "e11", "source": "dedup_candidates", "target": "score_candidates", "label": "dedup csv"},
+            {"id": "e12", "source": "score_candidates", "target": "write_sheet_csv", "label": "scored csv"},
+            {"id": "e13", "source": "write_sheet_csv", "target": "upload_scored_csv", "label": "sheet-ready csv"},
+            {"id": "e14", "source": "score_candidates", "target": "post_cost_summary", "label": "token usage + costs"},
         ],
         "notes": [
             {
                 "id": "n1",
                 "text": "Edit flow-proposed.json while planning, then sync to flow-current.json after implementation.",
-            }
+            },
+            {
+                "id": "n2",
+                "text": (
+                    "Steps widen_jd → generate_queries → exa_search → build_csv run in a batch loop, "
+                    "once per widening prompt (×6). After all batches, results are combined."
+                ),
+            },
         ],
     }
 
