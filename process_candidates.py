@@ -1060,19 +1060,22 @@ def run_pipeline_from_jd_text(
     exa_api_key: str,
     slack_token: str,
 ) -> Dict[str, Any]:
+    pipeline_start = time.monotonic()
     exa_query_prompt_template = read_text_file(args.exa_query_prompt_path)
     scorer_prompt_template = read_text_file(args.scorer_prompt_path)
 
     write_text_file(args.jd_path, jd_text)
     print(f"Wrote JD text to {args.jd_path}")
 
-    # --- Stage: widen JD with 6 meta prompts, then generate queries ---
+    # --- Stage: widen JD, generate queries, search Exa, and flatten — in batches ---
     debug_pause(args.debug, "generate_queries")
 
     widening_prompts = load_widening_prompts(args.jd_widening_prompts_dir)
     print(f"Loaded {len(widening_prompts)} JD-widening prompts.")
 
     all_queries: List[str] = []
+    all_rows: List[Dict[str, Any]] = []
+    total_exa_results = 0
     total_query_gen_usage: Dict[str, int] = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
 
     for wp_idx, (wp_name, wp_text) in enumerate(widening_prompts, start=1):
@@ -1099,7 +1102,23 @@ def run_pipeline_from_jd_text(
         print(f"  Generated {len(queries)} exa queries for '{wp_name}'.")
         all_queries.extend(queries)
 
-    print(f"\nTotal exa queries generated: {len(all_queries)}")
+        # Run Exa searches for this batch and flatten immediately to reduce peak memory.
+        batch_result = run_exa_fanout(
+            exa_api_key=exa_api_key,
+            queries=queries,
+            num_results_per_query=args.num_results_per_query,
+        )
+        batch_items = batch_result.get("results", [])
+        total_exa_results += len(batch_items)
+
+        batch_rows = flatten_exa_results_to_rows(batch_items)
+        all_rows.extend(batch_rows)
+        print(f"  Exa batch: {len(batch_items)} results -> {len(batch_rows)} rows ({len(all_rows)} total)")
+
+        # Free raw Exa results before the next batch.
+        del batch_result, batch_items, batch_rows
+
+    print(f"\nTotal exa queries: {len(all_queries)}, total rows: {len(all_rows)}")
 
     logs_dir = args.debug_dir if args.debug else os.path.join(os.path.dirname(args.jd_path), "logs")
     queries_log_path = write_queries_log_file(logs_dir, all_queries)
@@ -1107,20 +1126,11 @@ def run_pipeline_from_jd_text(
         print(f"Debug query log saved: {queries_log_path}")
 
     maybe_stop(args.stop_after, "generate_queries")
-
-    debug_pause(args.debug, "exa_search")
-    consolidated = run_exa_fanout(
-        exa_api_key=exa_api_key,
-        queries=all_queries,
-        num_results_per_query=args.num_results_per_query,
-    )
-
     maybe_stop(args.stop_after, "exa_search")
 
     debug_pause(args.debug, "csv")
-    write_consolidated_json(args.results_json, consolidated)
-    rows = flatten_exa_results_to_rows(consolidated.get("results", []))
-    csv_df = write_results_csv(args.candidates_csv, rows)
+    csv_df = write_results_csv(args.candidates_csv, all_rows)
+    del all_rows  # Free flattened rows now that they are written to CSV
 
     maybe_stop(args.stop_after, "csv")
 
@@ -1177,17 +1187,19 @@ def run_pipeline_from_jd_text(
 
     cost_summary = compute_cost_summary(
         exa_request_count=len(all_queries),
-        exa_pages_count=int(consolidated.get("total_results") or 0),
+        exa_pages_count=total_exa_results,
         openai_input_tokens=total_input_tokens,
         openai_output_tokens=total_output_tokens,
         scored_count=len(scored_df),
         used_assumptions=used_assumptions,
     )
 
+    elapsed = time.monotonic() - pipeline_start
     upload_comment = (
         f"AI-scored candidates CSV for this JD ({len(scored_df)} scored, "
         f"{len(dedup_df)} after dedup from {len(csv_df)} fetched). "
-        f"Est. cost/candidate: ${cost_summary['per_scored_candidate']:.4f}."
+        f"Est. cost/candidate: ${cost_summary['per_scored_candidate']:.4f}. "
+        f"Total time: {format_eta_seconds(elapsed)}."
     )
     slack_upload = upload_csv_to_slack(
         slack_token=slack_token,
@@ -1201,7 +1213,7 @@ def run_pipeline_from_jd_text(
 
     return {
         "queries_count": len(all_queries),
-        "total_results": int(consolidated.get("total_results") or 0),
+        "total_results": total_exa_results,
         "rows_before_dedup": int(len(csv_df)),
         "rows_after_dedup": int(len(dedup_df)),
         "rows_scored": int(len(scored_df)),
