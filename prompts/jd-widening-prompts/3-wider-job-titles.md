@@ -19,6 +19,7 @@ Title Widening Rules:
 
 For all other fields: extract exactly as stated in the JD. Do not infer, 
 expand, or modify them. If a field is not mentioned, write "not specified".
+Do not include your reasoning or any additional information in the output.
 
 Job Description:
 [JD]
