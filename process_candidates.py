@@ -286,7 +286,7 @@ def generate_exa_queries(
         response = client.chat.completions.create(
             model=model,
             messages=messages,
-            max_tokens=16384,
+            max_completion_tokens=16384,
             response_format=QUERY_RESPONSE_SCHEMA,
         )
 
