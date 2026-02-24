@@ -260,42 +260,78 @@ def generate_exa_queries(
     structured_profile: str,
     exa_query_prompt_template: str,
     model: str,
+    max_retries: int = 3,
 ) -> Tuple[List[str], Dict[str, int]]:
     prompt = exa_query_prompt_template.replace(
         "[STRUCTURED PROFILE OUTPUT FROM META PROMPT]",
         structured_profile.strip(),
     )
 
-    response = client.chat.completions.create(
-        model=model,
-        messages=[
+    last_usage: Dict[str, int] = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+
+    for attempt in range(1, max_retries + 1):
+        messages = [
             {
                 "role": "system",
                 "content": "Generate high-quality, diverse Exa search prompts as valid JSON.",
             },
             {"role": "user", "content": prompt},
-        ],
-        temperature=0.4,
-        max_tokens=16384,
-        response_format=QUERY_RESPONSE_SCHEMA,
-    )
+        ]
+        # On retries, ask the model to be concise.
+        if attempt > 1:
+            messages.append({
+                "role": "user",
+                "content": "IMPORTANT: Keep each query under 150 words. Be concise.",
+            })
 
-    finish_reason = getattr(response.choices[0], "finish_reason", None)
-    if finish_reason == "length":
-        raise RuntimeError(
-            "OpenAI response truncated (finish_reason='length') during query generation. "
-            "The structured profile may be too long."
+        response = client.chat.completions.create(
+            model=model,
+            messages=messages,
+            temperature=0.4,
+            max_tokens=16384,
+            response_format=QUERY_RESPONSE_SCHEMA,
         )
 
-    raw = (response.choices[0].message.content or "").strip()
-    data = json.loads(raw)
-    queries = [q.strip() for q in data["queries"] if q and q.strip()]
+        last_usage = extract_usage_tokens(response)
+        finish_reason = getattr(response.choices[0], "finish_reason", None)
 
-    if len(queries) != 10:
-        raise RuntimeError(f"Expected 10 queries, got {len(queries)}")
+        if finish_reason != "length":
+            # Normal completion — parse and return.
+            raw = (response.choices[0].message.content or "").strip()
+            data = json.loads(raw)
+            queries = [q.strip() for q in data["queries"] if q and q.strip()]
+            if not queries:
+                raise RuntimeError("Query generation returned zero queries.")
+            if len(queries) != 10:
+                print(f"  [warn] Expected 10 queries, got {len(queries)}; proceeding anyway.")
+            return queries, last_usage
 
-    usage = extract_usage_tokens(response)
-    return queries, usage
+        # Truncated response — try to salvage partial queries.
+        print(f"  [warn] Query generation truncated (attempt {attempt}/{max_retries}).")
+        if attempt == max_retries:
+            raw = (response.choices[0].message.content or "").strip()
+            # Try to extract whatever queries were completed before truncation.
+            try:
+                # The JSON is incomplete, try to fix it by closing arrays/objects.
+                patched = raw.rstrip()
+                if not patched.endswith("]}"):
+                    # Find the last complete string in the queries array.
+                    last_quote = patched.rfind('"')
+                    if last_quote > 0:
+                        patched = patched[:last_quote + 1] + "]}"
+                data = json.loads(patched)
+                queries = [q.strip() for q in data.get("queries", []) if q and q.strip()]
+                if queries:
+                    print(f"  [warn] Salvaged {len(queries)} queries from truncated response.")
+                    return queries, last_usage
+            except (json.JSONDecodeError, Exception):
+                pass
+            raise RuntimeError(
+                "OpenAI response truncated after all retries during query generation."
+            )
+
+    # Should not reach here, but satisfy type checker.
+    raise RuntimeError("Query generation failed unexpectedly.")
 
 
 def write_queries_log_file(output_dir: str, queries: List[str]) -> str:
@@ -1258,7 +1294,7 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument("--channel-id", default=CHANNEL_ID_DEFAULT)
     parser.add_argument("--debug", action="store_true", help="Enable debug logs and step-by-step prompt")
     parser.add_argument("--stop-after", choices=STAGES, default=None)
-    parser.add_argument("--model", default="gpt-4o-mini", help="Model for JD widening and query generation")
+    parser.add_argument("--model", default="gpt-4o", help="Model for JD widening and query generation")
     parser.add_argument("--scorer-model", default="gpt-4o", help="Model for candidate scoring (supports structured output)")
     parser.add_argument("--max-messages", type=int, default=500)
 
