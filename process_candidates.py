@@ -1295,7 +1295,7 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument("--debug", action="store_true", help="Enable debug logs and step-by-step prompt")
     parser.add_argument("--stop-after", choices=STAGES, default=None)
     parser.add_argument("--model", default="gpt-4o-mini", help="Model for JD widening and query generation")
-    parser.add_argument("--scorer-model", default="gpt-4o", help="Model for candidate scoring (supports structured output)")
+    parser.add_argument("--scorer-model", default="gpt-4o-mini", help="Model for candidate scoring (supports structured output)")
     parser.add_argument("--max-messages", type=int, default=500)
 
     parser.add_argument("--jd-path", default="jd.md")
