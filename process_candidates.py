@@ -186,7 +186,6 @@ def widen_jd(
             },
             {"role": "user", "content": prompt},
         ],
-        temperature=0.2,
     )
 
     profile_text = (response.choices[0].message.content or "").strip()
@@ -287,7 +286,6 @@ def generate_exa_queries(
         response = client.chat.completions.create(
             model=model,
             messages=messages,
-            temperature=0.4,
             max_tokens=16384,
             response_format=QUERY_RESPONSE_SCHEMA,
         )
@@ -818,7 +816,6 @@ def get_ai_score(
                 },
                 {"role": "user", "content": scorer_prompt},
             ],
-            temperature=0.0,
             response_format=SCORE_RESPONSE_SCHEMA,
         )
         raw = (response.choices[0].message.content or "").strip()
