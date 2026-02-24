@@ -939,8 +939,8 @@ def compute_cost_summary(
 ) -> Dict[str, Any]:
     exa_search_per_1000 = float(os.getenv("EXA_SEARCH_COST_PER_1000_REQUESTS", "25"))
     exa_text_per_1000 = float(os.getenv("EXA_TEXT_COST_PER_1000_PAGES", "1"))
-    openai_input_per_1m = float(os.getenv("OPENAI_INPUT_COST_PER_1M_TOKENS", "0.15"))
-    openai_output_per_1m = float(os.getenv("OPENAI_OUTPUT_COST_PER_1M_TOKENS", "0.60"))
+    openai_input_per_1m = float(os.getenv("OPENAI_INPUT_COST_PER_1M_TOKENS", "2.50"))
+    openai_output_per_1m = float(os.getenv("OPENAI_OUTPUT_COST_PER_1M_TOKENS", "10.00"))
 
     exa_search_cost = (exa_request_count / 1000.0) * exa_search_per_1000
     exa_text_cost = (exa_pages_count / 1000.0) * exa_text_per_1000
