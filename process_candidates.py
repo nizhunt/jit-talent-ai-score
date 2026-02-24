@@ -48,7 +48,7 @@ BASE_CSV_FIRST_COLUMNS = [
     "current_company",
     "text",
 ]
-SCORED_CSV_FIRST_COLUMNS = ["ai-score", "ai-reason"]
+SCORED_CSV_FIRST_COLUMNS = ["ai-score", "ai-reason", "ai-email"]
 SHEET_COLUMN_LABEL_OVERRIDES = {
     "first_name": "First Name",
     "last_name": "Last Name",
@@ -57,6 +57,7 @@ SHEET_COLUMN_LABEL_OVERRIDES = {
     "raw_json": "Raw JSON",
     "ai-score": "AI Score",
     "ai-reason": "AI Reason",
+    "ai-email": "AI Email",
     "linkedin": "LinkedIn",
     "url": "URL",
     "id": "ID",
@@ -99,8 +100,12 @@ SCORE_RESPONSE_SCHEMA = {
                     "type": "string",
                     "description": "Brief reasoning for the score",
                 },
+                "email": {
+                    "type": "string",
+                    "description": "Outreach email for the candidate (blank for score 0-3)",
+                },
             },
-            "required": ["score", "reason"],
+            "required": ["score", "reason", "email"],
             "additionalProperties": False,
         },
     },
@@ -746,9 +751,9 @@ def get_ai_score(
     jd_text: str,
     scorer_prompt_template: str,
     model: str,
-) -> Tuple[Any, str, Dict[str, int]]:
+) -> Tuple[Any, str, str, Dict[str, int]]:
     if not candidate_text or pd.isna(candidate_text):
-        return 0, "No candidate data available", {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+        return 0, "No candidate data available", "", {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
 
     scorer_prompt = scorer_prompt_template.replace("[PASTE LINKEDIN DATA]", str(candidate_text))
     scorer_prompt = scorer_prompt.replace("[PASTE JD TEXT]", jd_text)
@@ -761,7 +766,7 @@ def get_ai_score(
                     "role": "system",
                     "content": (
                         "You are an expert recruiter. Evaluate the candidate against the "
-                        "job description. Return JSON with keys 'score' and 'reason'."
+                        "job description. Return JSON with keys 'score', 'reason', and 'email'."
                     ),
                 },
                 {"role": "user", "content": scorer_prompt},
@@ -771,10 +776,10 @@ def get_ai_score(
         )
         raw = (response.choices[0].message.content or "").strip()
         data = json.loads(raw)
-        return int(data["score"]), data["reason"], extract_usage_tokens(response)
+        return int(data["score"]), data["reason"], data.get("email", ""), extract_usage_tokens(response)
     except Exception as exc:
         print(f"  [warn] scoring error: {exc}")
-        return "Error", str(exc), {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+        return "Error", str(exc), "", {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
 
 
 def extract_usage_tokens(response: Any) -> Dict[str, int]:
@@ -806,6 +811,8 @@ def score_candidates_csv(
         df["ai-score"] = None
     if "ai-reason" not in df.columns:
         df["ai-reason"] = None
+    if "ai-email" not in df.columns:
+        df["ai-email"] = None
 
     pending = df["ai-score"].isna()
     pending_count = int(pending.sum())
@@ -831,7 +838,7 @@ def score_candidates_csv(
         if not text and "raw_json" in df.columns:
             text = normalize_whitespace(df.at[idx, "raw_json"])
 
-        score, reason, usage = get_ai_score(
+        score, reason, email, usage = get_ai_score(
             client=client,
             candidate_text=text,
             jd_text=jd_text,
@@ -844,6 +851,7 @@ def score_candidates_csv(
 
         df.at[idx, "ai-score"] = score
         df.at[idx, "ai-reason"] = reason
+        df.at[idx, "ai-email"] = email
         progress.update(1)
 
         processed = int(progress.n)
