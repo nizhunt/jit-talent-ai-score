@@ -33,6 +33,7 @@ def build_pipeline_args(channel_id: str) -> argparse.Namespace:
     project_root = os.path.dirname(os.path.abspath(__file__))
     args.exa_query_prompt_path = os.path.join(project_root, "prompts", "exa-querry-creator-prompt.md")
     args.scorer_prompt_path = os.path.join(project_root, "prompts", "scorer_prompt.md")
+    args.jd_widening_prompts_dir = os.path.join(project_root, "prompts", "jd-widening-prompts")
 
     run_id = uuid.uuid4().hex[:12]
     run_dir = os.path.join("/tmp", f"jit-talent-worker-{run_id}")

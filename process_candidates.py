@@ -1,4 +1,5 @@
 import argparse
+import glob
 import hashlib
 import json
 import os
@@ -36,8 +37,30 @@ STAGES = [
     "post",
 ]
 
-BASE_CSV_FIRST_COLUMNS = ["name", "linkedin", "location", "text"]
+BASE_CSV_FIRST_COLUMNS = [
+    "first_name",
+    "last_name",
+    "name",
+    "linkedin",
+    "location",
+    "title",
+    "current_title",
+    "current_company",
+    "text",
+]
 SCORED_CSV_FIRST_COLUMNS = ["ai-score", "ai-reason"]
+SHEET_COLUMN_LABEL_OVERRIDES = {
+    "first_name": "First Name",
+    "last_name": "Last Name",
+    "name": "Full Name",
+    "text": "Profile Text",
+    "raw_json": "Raw JSON",
+    "ai-score": "AI Score",
+    "ai-reason": "AI Reason",
+    "linkedin": "LinkedIn",
+    "url": "URL",
+    "id": "ID",
+}
 
 QUERY_RESPONSE_SCHEMA = {
     "type": "json_schema",
@@ -50,8 +73,8 @@ QUERY_RESPONSE_SCHEMA = {
                 "queries": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "minItems": 15,
-                    "maxItems": 15,
+                    "minItems": 10,
+                    "maxItems": 10,
                 }
             },
             "required": ["queries"],
@@ -124,6 +147,51 @@ def write_text_file(path: str, content: str) -> None:
         f.write(content)
 
 
+def load_widening_prompts(prompts_dir: str) -> List[Tuple[str, str]]:
+    """Load all JD-widening prompt files from the given directory, sorted by filename."""
+    pattern = os.path.join(prompts_dir, "*.md")
+    files = sorted(glob.glob(pattern))
+    if not files:
+        raise RuntimeError(f"No widening prompt files found in {prompts_dir}")
+    prompts: List[Tuple[str, str]] = []
+    for filepath in files:
+        name = os.path.splitext(os.path.basename(filepath))[0]
+        text = read_text_file(filepath)
+        prompts.append((name, text))
+    return prompts
+
+
+def widen_jd(
+    client: OpenAI,
+    jd_text: str,
+    widening_prompt: str,
+    prompt_name: str,
+    model: str,
+) -> Tuple[str, Dict[str, int]]:
+    """Apply a single JD-widening meta prompt to produce a structured search profile."""
+    prompt = widening_prompt.replace("[JD]", jd_text.strip())
+
+    response = client.chat.completions.create(
+        model=model,
+        messages=[
+            {
+                "role": "system",
+                "content": "You are a structured data extraction assistant. Return the structured profile exactly as requested.",
+            },
+            {"role": "user", "content": prompt},
+        ],
+        temperature=0.2,
+    )
+
+    profile_text = (response.choices[0].message.content or "").strip()
+    if not profile_text:
+        raise RuntimeError(f"Widening prompt '{prompt_name}' returned empty profile.")
+
+    usage = extract_usage_tokens(response)
+    print(f"  Widened JD with '{prompt_name}' ({len(profile_text)} chars)")
+    return profile_text, usage
+
+
 def fetch_latest_jd_from_slack(
     slack_token: str,
     channel_id: str,
@@ -183,14 +251,13 @@ def fetch_latest_jd_from_slack(
 
 def generate_exa_queries(
     client: OpenAI,
-    jd_text: str,
+    structured_profile: str,
     exa_query_prompt_template: str,
     model: str,
 ) -> Tuple[List[str], Dict[str, int]]:
-    prompt = (
-        f"{exa_query_prompt_template.strip()}\\n\\n"
-        "Job description:\\n"
-        f"{jd_text.strip()}"
+    prompt = exa_query_prompt_template.replace(
+        "[STRUCTURED PROFILE OUTPUT FROM META PROMPT]",
+        structured_profile.strip(),
     )
 
     response = client.chat.completions.create(
@@ -210,8 +277,8 @@ def generate_exa_queries(
     data = json.loads(raw)
     queries = [q.strip() for q in data["queries"] if q and q.strip()]
 
-    if len(queries) != 15:
-        raise RuntimeError(f"Expected 15 queries, got {len(queries)}")
+    if len(queries) != 10:
+        raise RuntimeError(f"Expected 10 queries, got {len(queries)}")
 
     usage = extract_usage_tokens(response)
     return queries, usage
@@ -306,7 +373,7 @@ def run_exa_fanout(
                 "result_count": len(items),
             }
         )
-        print(f"Exa query {idx}/15: received {len(items)} results")
+        print(f"Exa query {idx}/{len(queries)}: received {len(items)} results")
 
     return {
         "fetched_at": datetime.utcnow().isoformat() + "Z",
@@ -362,13 +429,149 @@ def pick_linkedin(result: Dict[str, Any]) -> str:
     return ""
 
 
+def pick_first_non_empty(source: Dict[str, Any], keys: List[str]) -> str:
+    for key in keys:
+        value = normalize_whitespace(source.get(key))
+        if value:
+            return value
+    return ""
+
+
+def split_name(name: str, explicit_first_name: str = "", explicit_last_name: str = "") -> Tuple[str, str]:
+    first_name = normalize_whitespace(explicit_first_name)
+    last_name = normalize_whitespace(explicit_last_name)
+    if first_name or last_name:
+        return first_name, last_name
+
+    normalized_name = normalize_whitespace(name)
+    if not normalized_name:
+        return "", ""
+
+    parts = normalized_name.split(" ")
+    if len(parts) == 1:
+        return parts[0], ""
+    return parts[0], " ".join(parts[1:])
+
+
+def normalize_list(value: Any) -> List[Any]:
+    if isinstance(value, list):
+        return value
+    return []
+
+
+def extract_work_history(item: Dict[str, Any]) -> List[Any]:
+    for key in ["workHistory", "experiences", "experience", "work_experience", "positions"]:
+        value = item.get(key)
+        if isinstance(value, list):
+            return value
+    return []
+
+
+def extract_education_history(item: Dict[str, Any]) -> List[Any]:
+    for key in ["educationHistory", "education", "educations"]:
+        value = item.get(key)
+        if isinstance(value, list):
+            return value
+    return []
+
+
+def flatten_work_history(row: Dict[str, Any], work_history: List[Any]) -> None:
+    row["work_history_count"] = len(work_history)
+    summary_parts: List[str] = []
+
+    for idx, entry in enumerate(work_history, start=1):
+        if isinstance(entry, dict):
+            title = pick_first_non_empty(entry, ["title", "position", "role"])
+            company = pick_first_non_empty(entry, ["company", "companyName", "organization"])
+            location = pick_first_non_empty(entry, ["location", "place"])
+            from_date = pick_first_non_empty(entry, ["from", "startDate", "start", "fromDate"])
+            to_date = pick_first_non_empty(entry, ["to", "endDate", "end", "toDate"])
+            description = pick_first_non_empty(entry, ["description", "summary"])
+            company_id = pick_first_non_empty(entry, ["companyId", "company_id"])
+        else:
+            title = normalize_whitespace(entry)
+            company = ""
+            location = ""
+            from_date = ""
+            to_date = ""
+            description = ""
+            company_id = ""
+
+        if title and company:
+            summary_parts.append(f"{title} at {company}")
+        elif title:
+            summary_parts.append(title)
+        elif company:
+            summary_parts.append(company)
+
+        row[f"work_{idx}_title"] = title
+        row[f"work_{idx}_company"] = company
+        row[f"work_{idx}_company_id"] = company_id
+        row[f"work_{idx}_location"] = location
+        row[f"work_{idx}_from"] = from_date
+        row[f"work_{idx}_to"] = to_date
+        row[f"work_{idx}_description"] = description
+
+    row["work_history_summary"] = " | ".join(summary_parts)
+
+
+def flatten_education_history(row: Dict[str, Any], education_history: List[Any]) -> None:
+    row["education_history_count"] = len(education_history)
+    summary_parts: List[str] = []
+
+    for idx, entry in enumerate(education_history, start=1):
+        if isinstance(entry, dict):
+            institution = pick_first_non_empty(entry, ["institution", "school", "university", "organization"])
+            degree = pick_first_non_empty(entry, ["degree", "qualification"])
+            from_date = pick_first_non_empty(entry, ["from", "startDate", "start", "fromDate"])
+            to_date = pick_first_non_empty(entry, ["to", "endDate", "end", "toDate"])
+            institution_id = pick_first_non_empty(entry, ["institutionId", "institution_id", "schoolId"])
+        else:
+            institution = normalize_whitespace(entry)
+            degree = ""
+            from_date = ""
+            to_date = ""
+            institution_id = ""
+
+        if degree and institution:
+            summary_parts.append(f"{degree} at {institution}")
+        elif institution:
+            summary_parts.append(institution)
+        elif degree:
+            summary_parts.append(degree)
+
+        row[f"edu_{idx}_institution"] = institution
+        row[f"edu_{idx}_institution_id"] = institution_id
+        row[f"edu_{idx}_degree"] = degree
+        row[f"edu_{idx}_from"] = from_date
+        row[f"edu_{idx}_to"] = to_date
+
+    row["education_history_summary"] = " | ".join(summary_parts)
+
+
+def flatten_string_list(row: Dict[str, Any], values: List[Any], prefix: str) -> None:
+    cleaned: List[str] = []
+    for item in values:
+        if isinstance(item, dict):
+            value = pick_first_non_empty(item, ["name", "skill", "text", "label", "value"])
+        else:
+            value = normalize_whitespace(item)
+        if value:
+            cleaned.append(value)
+
+    row[f"{prefix}_count"] = len(cleaned)
+    row[f"{prefix}_summary"] = " | ".join(cleaned)
+    for idx, value in enumerate(cleaned, start=1):
+        row[f"{prefix}_{idx}"] = value
+
+
 def flatten_exa_results_to_rows(results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     rows: List[Dict[str, Any]] = []
 
     for item in results:
-        highlights = item.get("highlights")
+        highlights = normalize_list(item.get("highlights"))
         highlights_text = ""
-        if isinstance(highlights, list):
+        if highlights:
             highlights_text = " | ".join(
                 normalize_whitespace(x if not isinstance(x, dict) else x.get("text"))
                 for x in highlights
@@ -378,22 +581,51 @@ def flatten_exa_results_to_rows(results: List[Dict[str, Any]]) -> List[Dict[str,
         if not text:
             text = highlights_text
 
+        explicit_first_name = pick_first_non_empty(item, ["firstName", "first_name", "given_name"])
+        explicit_last_name = pick_first_non_empty(item, ["lastName", "last_name", "family_name"])
+        full_name = normalize_whitespace(item.get("name") or item.get("author"))
+        first_name, last_name = split_name(
+            name=full_name,
+            explicit_first_name=explicit_first_name,
+            explicit_last_name=explicit_last_name,
+        )
+        name = normalize_whitespace(" ".join(part for part in [first_name, last_name] if part)) or full_name
+
+        work_history = extract_work_history(item)
+        education_history = extract_education_history(item)
+        skills = normalize_list(item.get("skills"))
+
         row = {
             "source_query_index": item.get("_source_query_index"),
             "source_query": item.get("_source_query"),
             "id": normalize_whitespace(item.get("id")),
-            "name": normalize_whitespace(item.get("name") or item.get("author")),
+            "entity_id": normalize_whitespace(item.get("entityId")),
+            "entity_type": normalize_whitespace(item.get("entityType")),
+            "entity_version": normalize_whitespace(item.get("entityVersion")),
+            "name": name,
+            "first_name": first_name,
+            "last_name": last_name,
             "title": normalize_whitespace(item.get("title")),
+            "current_title": pick_first_non_empty(item, ["current_title", "currentTitle", "title"]),
+            "current_company": pick_first_non_empty(item, ["current_company", "currentCompany", "company"]),
             "company": normalize_whitespace(item.get("company")),
             "location": normalize_whitespace(item.get("location")),
+            "author": normalize_whitespace(item.get("author")),
+            "image": normalize_whitespace(item.get("image")),
             "linkedin": pick_linkedin(item),
             "url": normalize_whitespace(item.get("url")),
-            "published_date": normalize_whitespace(item.get("publishedDate")),
+            "published_date": pick_first_non_empty(item, ["publishedDate", "published_date"]),
             "score": item.get("score"),
             "highlights": highlights_text,
+            "highlight_scores": normalize_whitespace(item.get("highlightScores")),
             "text": text,
             "raw_json": json.dumps(item, ensure_ascii=False),
         }
+
+        flatten_work_history(row, work_history)
+        flatten_education_history(row, education_history)
+        flatten_string_list(row, skills, "skill")
+        flatten_string_list(row, highlights, "highlight")
         rows.append(row)
 
     return rows
@@ -408,6 +640,40 @@ def reorder_columns(df: pd.DataFrame, first_columns: List[str]) -> pd.DataFrame:
     ordered_first = [col for col in first_columns if col in df.columns]
     remaining = [col for col in df.columns if col not in ordered_first]
     return df[ordered_first + remaining]
+
+
+def prettify_sheet_column_name(column: str) -> str:
+    override = SHEET_COLUMN_LABEL_OVERRIDES.get(column)
+    if override:
+        return override
+
+    acronyms = {
+        "ai": "AI",
+        "id": "ID",
+        "url": "URL",
+        "json": "JSON",
+        "jd": "JD",
+        "llm": "LLM",
+    }
+    tokens = [part for part in column.replace("-", "_").split("_") if part]
+    if not tokens:
+        return column
+
+    label_parts: List[str] = []
+    for token in tokens:
+        if token.isdigit():
+            label_parts.append(token)
+            continue
+        label_parts.append(acronyms.get(token.lower(), token.capitalize()))
+
+    return " ".join(label_parts)
+
+
+def write_sheet_ready_csv(path: str, df: pd.DataFrame) -> pd.DataFrame:
+    rename_map = {col: prettify_sheet_column_name(str(col)) for col in df.columns}
+    sheet_df = df.rename(columns=rename_map)
+    sheet_df.to_csv(path, index=False)
+    return sheet_df
 
 
 def write_results_csv(path: str, rows: List[Dict[str, Any]]) -> pd.DataFrame:
@@ -534,8 +800,6 @@ def score_candidates_csv(
     scorer_prompt_template: str,
     model: str,
     progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
-    notify_every: int = 50,
-    initial_seconds_per_candidate: float = 2.5,
 ) -> Tuple[pd.DataFrame, Dict[str, int]]:
     df = pd.read_csv(input_csv)
     if "ai-score" not in df.columns:
@@ -546,15 +810,14 @@ def score_candidates_csv(
     pending = df["ai-score"].isna()
     pending_count = int(pending.sum())
     print(f"Scoring {pending_count} candidates...")
-    if progress_callback is not None:
-        progress_callback(
-            {
-                "event": "start",
-                "pending_count": pending_count,
-                "eta_seconds": pending_count * max(0.1, initial_seconds_per_candidate),
-                "seconds_per_candidate": max(0.1, initial_seconds_per_candidate),
-            }
-        )
+
+    # Fixed milestones: notify at 25%, 50%, 75% only (3 progress updates).
+    milestone_pcts = [25, 50, 75]
+    milestone_thresholds = set()
+    for pct in milestone_pcts:
+        threshold = int(pending_count * pct / 100)
+        if 0 < threshold < pending_count:
+            milestone_thresholds.add(threshold)
 
     progress = tqdm(total=pending_count, desc="Scoring", unit="candidate")
     started_at = time.monotonic()
@@ -584,25 +847,22 @@ def score_candidates_csv(
         progress.update(1)
 
         processed = int(progress.n)
-        if processed > 0 and progress_callback is not None:
+        if processed > 0 and progress_callback is not None and processed in milestone_thresholds:
             elapsed = time.monotonic() - started_at
             seconds_per_candidate = elapsed / processed
             remaining = max(0, pending_count - processed)
             eta_seconds = remaining * seconds_per_candidate
-            if (
-                processed == 1
-                or (notify_every > 0 and (processed % notify_every) == 0)
-                or processed == pending_count
-            ):
-                progress_callback(
-                    {
-                        "event": "progress",
-                        "processed": processed,
-                        "pending_count": pending_count,
-                        "seconds_per_candidate": seconds_per_candidate,
-                        "eta_seconds": eta_seconds,
-                    }
-                )
+            pct = processed / pending_count * 100.0
+            progress_callback(
+                {
+                    "event": "progress",
+                    "processed": processed,
+                    "pending_count": pending_count,
+                    "seconds_per_candidate": seconds_per_candidate,
+                    "eta_seconds": eta_seconds,
+                    "pct": pct,
+                }
+            )
 
         if (progress.n % 10) == 0:
             reorder_columns(df, SCORED_CSV_FIRST_COLUMNS).to_csv(output_csv, index=False)
@@ -790,99 +1050,86 @@ def run_pipeline_from_jd_text(
     write_text_file(args.jd_path, jd_text)
     print(f"Wrote JD text to {args.jd_path}")
 
+    # --- Stage: widen JD with 6 meta prompts, then generate queries ---
     debug_pause(args.debug, "generate_queries")
-    queries, query_generation_usage = generate_exa_queries(
-        client=client,
-        jd_text=jd_text,
-        exa_query_prompt_template=exa_query_prompt_template,
-        model=args.model,
-    )
+
+    widening_prompts = load_widening_prompts(args.jd_widening_prompts_dir)
+    print(f"Loaded {len(widening_prompts)} JD-widening prompts.")
+
+    all_queries: List[str] = []
+    total_query_gen_usage: Dict[str, int] = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+
+    for wp_idx, (wp_name, wp_text) in enumerate(widening_prompts, start=1):
+        print(f"\n[{wp_idx}/{len(widening_prompts)}] Widening JD with '{wp_name}'...")
+        profile, widen_usage = widen_jd(
+            client=client,
+            jd_text=jd_text,
+            widening_prompt=wp_text,
+            prompt_name=wp_name,
+            model=args.model,
+        )
+        for key in total_query_gen_usage:
+            total_query_gen_usage[key] += int(widen_usage.get(key, 0))
+
+        queries, qgen_usage = generate_exa_queries(
+            client=client,
+            structured_profile=profile,
+            exa_query_prompt_template=exa_query_prompt_template,
+            model=args.model,
+        )
+        for key in total_query_gen_usage:
+            total_query_gen_usage[key] += int(qgen_usage.get(key, 0))
+
+        print(f"  Generated {len(queries)} exa queries for '{wp_name}'.")
+        all_queries.extend(queries)
+
+    print(f"\nTotal exa queries generated: {len(all_queries)}")
+
     logs_dir = args.debug_dir if args.debug else os.path.join(os.path.dirname(args.jd_path), "logs")
-    queries_log_path = write_queries_log_file(logs_dir, queries)
+    queries_log_path = write_queries_log_file(logs_dir, all_queries)
     if args.debug:
         print(f"Debug query log saved: {queries_log_path}")
-    try:
-        upload_file_to_slack(
-            slack_token=slack_token,
-            channel_id=args.channel_id,
-            file_path=queries_log_path,
-            initial_comment=f"{len(queries)} Exa prompts generated for this JD.",
-            content_type="text/plain",
-        )
-    except Exception as exc:
-        print(f"[warn] failed to upload Exa prompt log to Slack: {exc}")
-    post_pipeline_update(
-        slack_token=slack_token,
-        channel_id=args.channel_id,
-        text=f"{len(queries)} Exa prompts created.",
-    )
+
     maybe_stop(args.stop_after, "generate_queries")
 
     debug_pause(args.debug, "exa_search")
     consolidated = run_exa_fanout(
         exa_api_key=exa_api_key,
-        queries=queries,
+        queries=all_queries,
         num_results_per_query=args.num_results_per_query,
     )
-    print(f"Total Exa results fetched: {consolidated.get('total_results')}")
-    post_pipeline_update(
-        slack_token=slack_token,
-        channel_id=args.channel_id,
-        text=(
-            f"{int(consolidated.get('total_results') or 0)} candidates fetched "
-            f"from Exa across {len(queries)} prompts."
-        ),
-    )
+
     maybe_stop(args.stop_after, "exa_search")
 
     debug_pause(args.debug, "csv")
     write_consolidated_json(args.results_json, consolidated)
     rows = flatten_exa_results_to_rows(consolidated.get("results", []))
     csv_df = write_results_csv(args.candidates_csv, rows)
-    print(f"Wrote {len(csv_df)} rows to {args.candidates_csv}")
+
     maybe_stop(args.stop_after, "csv")
 
     debug_pause(args.debug, "dedup")
     dedup_df = deduplicate_csv(args.candidates_csv, args.dedup_csv)
-    print(f"Deduplicated: {len(csv_df)} -> {len(dedup_df)} rows. Output: {args.dedup_csv}")
-    post_pipeline_update(
-        slack_token=slack_token,
-        channel_id=args.channel_id,
-        text=f"{len(dedup_df)} candidates after deduplication (from {len(csv_df)}).",
-    )
+
     maybe_stop(args.stop_after, "dedup")
 
     debug_pause(args.debug, "score")
-    notify_every = max(1, int(os.getenv("SCORE_PROGRESS_NOTIFY_EVERY", "50")))
-    initial_spc = max(0.1, float(os.getenv("SCORE_INITIAL_SECONDS_PER_CANDIDATE", "2.5")))
 
     def on_score_progress(payload: Dict[str, Any]) -> None:
-        event_type = payload.get("event")
-        if event_type == "start":
-            post_pipeline_update(
-                slack_token=slack_token,
-                channel_id=args.channel_id,
-                text=(
-                    "Evaluation started. "
-                    f"ETA: {format_eta_seconds(float(payload.get('eta_seconds') or 0))} "
-                    f"(~{float(payload.get('seconds_per_candidate') or 0):.2f}s/candidate)."
-                ),
-            )
+        if payload.get("event") != "progress":
             return
-
-        if event_type == "progress":
-            processed = int(payload.get("processed") or 0)
-            total = int(payload.get("pending_count") or 0)
-            pct = (processed / total * 100.0) if total else 100.0
-            post_pipeline_update(
-                slack_token=slack_token,
-                channel_id=args.channel_id,
-                text=(
-                    f"Scoring: {pct:.0f}% ({processed}/{total}). "
-                    f"ETA: {format_eta_seconds(float(payload.get('eta_seconds') or 0))} "
-                    f"({float(payload.get('seconds_per_candidate') or 0):.2f}s/candidate)."
-                ),
-            )
+        processed = int(payload.get("processed") or 0)
+        total = int(payload.get("pending_count") or 0)
+        pct = payload.get("pct", (processed / total * 100.0) if total else 100.0)
+        post_pipeline_update(
+            slack_token=slack_token,
+            channel_id=args.channel_id,
+            text=(
+                f"Scoring: {pct:.0f}% ({processed}/{total}). "
+                f"ETA: {format_eta_seconds(float(payload.get('eta_seconds') or 0))} "
+                f"({float(payload.get('seconds_per_candidate') or 0):.2f}s/candidate)."
+            ),
+        )
 
     scored_df, scoring_usage = score_candidates_csv(
         client=client,
@@ -892,29 +1139,19 @@ def run_pipeline_from_jd_text(
         scorer_prompt_template=scorer_prompt_template,
         model=args.model,
         progress_callback=on_score_progress,
-        notify_every=notify_every,
-        initial_seconds_per_candidate=initial_spc,
     )
-    print(f"Scored rows: {len(scored_df)}. Output: {args.scored_csv}")
-    post_pipeline_update(
-        slack_token=slack_token,
-        channel_id=args.channel_id,
-        text=f"AI scoring completed for {len(scored_df)} candidates.",
-    )
+
     maybe_stop(args.stop_after, "score")
 
     debug_pause(args.debug, "post")
-    slack_upload = upload_csv_to_slack(
-        slack_token=slack_token,
-        channel_id=args.channel_id,
-        csv_path=args.scored_csv,
-        initial_comment="Here is the AI-scored candidates CSV for this JD.",
-    )
-    file_id = (slack_upload.get("file") or {}).get("id")
-    print(f"Uploaded scored CSV to Slack channel {args.channel_id}. file_id={file_id}")
+    if args.scored_csv.lower().endswith(".csv"):
+        sheet_ready_csv = f"{args.scored_csv[:-4]}-sheet-ready.csv"
+    else:
+        sheet_ready_csv = f"{args.scored_csv}-sheet-ready.csv"
+    write_sheet_ready_csv(sheet_ready_csv, scored_df)
 
-    total_input_tokens = int(query_generation_usage.get("input_tokens", 0)) + int(scoring_usage.get("input_tokens", 0))
-    total_output_tokens = int(query_generation_usage.get("output_tokens", 0)) + int(scoring_usage.get("output_tokens", 0))
+    total_input_tokens = int(total_query_gen_usage.get("input_tokens", 0)) + int(scoring_usage.get("input_tokens", 0))
+    total_output_tokens = int(total_query_gen_usage.get("output_tokens", 0)) + int(scoring_usage.get("output_tokens", 0))
     used_assumptions = False
     if total_input_tokens == 0 and total_output_tokens == 0:
         used_assumptions = True
@@ -923,7 +1160,7 @@ def run_pipeline_from_jd_text(
         total_output_tokens = 3500 + (estimated_candidates * 120)
 
     cost_summary = compute_cost_summary(
-        exa_request_count=len(queries),
+        exa_request_count=len(all_queries),
         exa_pages_count=int(consolidated.get("total_results") or 0),
         openai_input_tokens=total_input_tokens,
         openai_output_tokens=total_output_tokens,
@@ -931,23 +1168,29 @@ def run_pipeline_from_jd_text(
         used_assumptions=used_assumptions,
     )
 
-    post_pipeline_update(
+    upload_comment = (
+        f"AI-scored candidates CSV for this JD ({len(scored_df)} scored, "
+        f"{len(dedup_df)} after dedup from {len(csv_df)} fetched). "
+        f"Est. cost/candidate: ${cost_summary['per_scored_candidate']:.4f}."
+    )
+    slack_upload = upload_csv_to_slack(
         slack_token=slack_token,
         channel_id=args.channel_id,
-        text=(
-            f"Estimated cost per scored candidate: ${cost_summary['per_scored_candidate']:.4f} "
-            f"(Exa + OpenAI{', using assumptions' if cost_summary['used_assumptions'] else ', using actual usage'})."
-        ),
+        csv_path=sheet_ready_csv,
+        initial_comment=upload_comment,
     )
+    file_id = (slack_upload.get("file") or {}).get("id")
+
     maybe_stop(args.stop_after, "post")
 
     return {
-        "queries_count": len(queries),
+        "queries_count": len(all_queries),
         "total_results": int(consolidated.get("total_results") or 0),
         "rows_before_dedup": int(len(csv_df)),
         "rows_after_dedup": int(len(dedup_df)),
         "rows_scored": int(len(scored_df)),
         "uploaded_file_id": file_id,
+        "sheet_ready_csv": sheet_ready_csv,
         "queries_log_path": queries_log_path,
         "cost_summary": cost_summary,
     }
@@ -964,6 +1207,7 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument("--jd-path", default="jd.md")
     parser.add_argument("--exa-query-prompt-path", default="prompts/exa-querry-creator-prompt.md")
     parser.add_argument("--scorer-prompt-path", default="prompts/scorer_prompt.md")
+    parser.add_argument("--jd-widening-prompts-dir", default="prompts/jd-widening-prompts")
 
     parser.add_argument("--results-json", default="exa-results.json")
     parser.add_argument("--candidates-csv", default="candidates.csv")

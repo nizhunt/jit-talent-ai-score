@@ -1,8 +1,8 @@
 {
-  "version": 1,
+  "version": 2,
   "title": "JIT Talent AI Score Pipeline",
   "description": "Visual map of the Slack -> queue -> worker pipeline. Use the proposed flow file to plan logic changes.",
-  "updated_at": "2026-02-22T09:49:56.578271Z",
+  "updated_at": "2026-02-24T10:25:00Z",
   "nodes": [
     {
       "id": "slack_event",
@@ -59,21 +59,30 @@
       "y": 320
     },
     {
-      "id": "generate_queries",
+      "id": "widen_jd",
       "type": "action",
-      "label": "Generate 15 Exa Queries",
-      "description": "OpenAI generates query list from JD text.",
+      "label": "Widen JD (6 Meta Prompts)",
+      "description": "Runs 6 JD-widening prompts (original, wider-location, wider-titles, wider-yoe, wider-companies, lenient-skills) to produce 6 structured search profiles.",
       "status": "current",
       "x": 1820,
+      "y": 160
+    },
+    {
+      "id": "generate_queries",
+      "type": "action",
+      "label": "Generate 60 Exa Queries (6×10)",
+      "description": "For each of the 6 widened profiles, OpenAI generates 10 Exa search queries. Total: 60 queries.",
+      "status": "current",
+      "x": 2120,
       "y": 160
     },
     {
       "id": "exa_search",
       "type": "action",
       "label": "Run Exa Fanout Search",
-      "description": "Fetches candidate profiles from Exa per query.",
+      "description": "Fetches up to 100 candidate profiles per query from Exa. Up to 6000 results total.",
       "status": "current",
-      "x": 2120,
+      "x": 2420,
       "y": 160
     },
     {
@@ -82,7 +91,7 @@
       "label": "Build Candidate CSV",
       "description": "Flatten Exa results and write candidates.csv.",
       "status": "current",
-      "x": 2390,
+      "x": 2700,
       "y": 160
     },
     {
@@ -91,7 +100,7 @@
       "label": "Deduplicate Candidates",
       "description": "Dedupes by normalized LinkedIn/name/location signals.",
       "status": "current",
-      "x": 2660,
+      "x": 2970,
       "y": 160
     },
     {
@@ -100,7 +109,7 @@
       "label": "Score Candidates with AI",
       "description": "Applies scoring prompt, posts progress updates to Slack.",
       "status": "current",
-      "x": 2920,
+      "x": 3240,
       "y": 160
     },
     {
@@ -109,7 +118,7 @@
       "label": "Upload Scored CSV to Slack",
       "description": "Sends final scored file and summary updates to channel.",
       "status": "current",
-      "x": 3190,
+      "x": 3510,
       "y": 160
     },
     {
@@ -118,7 +127,7 @@
       "label": "Post Cost Summary",
       "description": "Computes and posts estimated per-candidate cost.",
       "status": "current",
-      "x": 3190,
+      "x": 3510,
       "y": 360
     }
   ],
@@ -127,97 +136,79 @@
       "id": "e1",
       "source": "slack_event",
       "target": "verify_signature",
-      "label": "incoming event",
-      "source_port": "output_1",
-      "target_port": "input_1"
+      "label": "incoming event"
     },
     {
       "id": "e2",
       "source": "verify_signature",
       "target": "validate_message",
-      "label": "valid signature",
-      "source_port": "output_1",
-      "target_port": "input_1"
+      "label": "valid signature"
     },
     {
       "id": "e3",
       "source": "validate_message",
       "target": "deduplicate_event",
-      "label": "valid JD event",
-      "source_port": "output_1",
-      "target_port": "input_1"
+      "label": "valid JD event"
     },
     {
       "id": "e4",
       "source": "deduplicate_event",
       "target": "enqueue_job",
-      "label": "first delivery",
-      "source_port": "output_1",
-      "target_port": "input_1"
+      "label": "first delivery"
     },
     {
       "id": "e5",
       "source": "enqueue_job",
       "target": "worker_pickup",
-      "label": "rq queue",
-      "source_port": "output_1",
-      "target_port": "input_1"
+      "label": "rq queue"
     },
     {
       "id": "e6",
       "source": "worker_pickup",
+      "target": "widen_jd",
+      "label": "start worker flow"
+    },
+    {
+      "id": "e6b",
+      "source": "widen_jd",
       "target": "generate_queries",
-      "label": "start worker flow",
-      "source_port": "output_1",
-      "target_port": "input_1"
+      "label": "6 structured profiles"
     },
     {
       "id": "e7",
       "source": "generate_queries",
       "target": "exa_search",
-      "label": "15 queries",
-      "source_port": "output_1",
-      "target_port": "input_1"
+      "label": "60 queries"
     },
     {
       "id": "e8",
       "source": "exa_search",
       "target": "build_csv",
-      "label": "results",
-      "source_port": "output_1",
-      "target_port": "input_1"
+      "label": "~6000 results"
     },
     {
       "id": "e9",
       "source": "build_csv",
       "target": "dedup_candidates",
-      "label": "candidates.csv",
-      "source_port": "output_1",
-      "target_port": "input_1"
+      "label": "candidates.csv"
     },
     {
       "id": "e10",
       "source": "dedup_candidates",
       "target": "score_candidates",
-      "label": "dedup csv",
-      "source_port": "output_1",
-      "target_port": "input_1"
+      "label": "dedup csv"
     },
     {
       "id": "e11",
       "source": "score_candidates",
       "target": "upload_scored_csv",
-      "label": "scored csv",
-      "source_port": "output_1",
-      "target_port": "input_1"
+      "label": "scored csv"
     },
     {
       "id": "e12",
       "source": "score_candidates",
       "target": "post_cost_summary",
-      "label": "token usage + costs",
-      "source_port": "output_1",
-      "target_port": "input_1"
+      "label": "token usage + costs"
     }
   ],
   "notes": [
