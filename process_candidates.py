@@ -48,6 +48,7 @@ BASE_CSV_FIRST_COLUMNS = [
     "current_company",
     "text",
     "expansion_prompt_file",
+    "widened_jd_context",
 ]
 SCORED_CSV_FIRST_COLUMNS = ["ai-score", "ai-reason", "ai-email"]
 SHEET_COLUMN_LABEL_OVERRIDES = {
@@ -179,6 +180,24 @@ def read_text_file(path: str) -> str:
 def write_text_file(path: str, content: str) -> None:
     with open(path, "w", encoding="utf-8") as f:
         f.write(content)
+
+
+def cleanup_legacy_exa_query_logs() -> int:
+    patterns = [
+        os.path.join("/tmp", "jit-talent-worker-*", "**", "exa-queries-*.txt"),
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs", "exa-queries-*.txt"),
+    ]
+    removed = 0
+    for pattern in patterns:
+        for path in glob.glob(pattern, recursive=True):
+            try:
+                os.remove(path)
+                removed += 1
+            except FileNotFoundError:
+                continue
+            except Exception as exc:
+                print(f"[warn] failed to remove legacy query log '{path}': {exc}")
+    return removed
 
 
 def load_widening_prompts(prompts_dir: str) -> List[Tuple[str, str, str]]:
@@ -359,20 +378,6 @@ def generate_exa_queries(
 
     # Should not reach here, but satisfy type checker.
     raise RuntimeError("Query generation failed unexpectedly.")
-
-
-def write_queries_log_file(output_dir: str, queries: List[str]) -> str:
-    os.makedirs(output_dir, exist_ok=True)
-    filename = datetime.now().strftime("exa-queries-%Y%m%d-%H%M%S.txt")
-    path = os.path.join(output_dir, filename)
-
-    lines: List[str] = []
-    for idx, query in enumerate(queries, start=1):
-        lines.append(f"{idx}. {query}")
-        lines.append("")
-
-    write_text_file(path, "\\n".join(lines).strip() + "\\n")
-    return path
 
 
 def to_plain_object(value: Any) -> Any:
@@ -654,6 +659,7 @@ def flatten_string_list(row: Dict[str, Any], values: List[Any], prefix: str) -> 
 def flatten_exa_results_to_rows(
     results: List[Dict[str, Any]],
     expansion_prompt_file: str = "",
+    widened_jd_context: str = "",
 ) -> List[Dict[str, Any]]:
     rows: List[Dict[str, Any]] = []
 
@@ -688,6 +694,7 @@ def flatten_exa_results_to_rows(
             "source_query_index": item.get("_source_query_index"),
             "source_query": item.get("_source_query"),
             "expansion_prompt_file": expansion_prompt_file,
+            "widened_jd_context": widened_jd_context,
             "id": normalize_whitespace(item.get("id")),
             "entity_id": normalize_whitespace(item.get("entityId")),
             "entity_type": normalize_whitespace(item.get("entityType")),
@@ -875,7 +882,7 @@ def score_candidates_csv(
     client: OpenAI,
     input_csv: str,
     output_csv: str,
-    jd_text: str,
+    jd_context_by_prompt_file: Dict[str, str],
     scorer_prompt_template: str,
     model: str,
     progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
@@ -893,6 +900,39 @@ def score_candidates_csv(
     scoring_workers = get_scoring_concurrent_calls()
     print(f"Scoring {pending_count} candidates ({scoring_workers} concurrent)...")
 
+    if "expansion_prompt_file" not in df.columns:
+        raise RuntimeError(
+            "Missing required column 'expansion_prompt_file' in scoring input CSV. "
+            "Cannot select JD extension prompt for evaluation."
+        )
+
+    pending_indices = [idx for idx in df.index if pending[idx]]
+    missing_prompt_file_rows = [
+        int(idx)
+        for idx in pending_indices
+        if not normalize_whitespace(df.at[idx, "expansion_prompt_file"])
+    ]
+    if missing_prompt_file_rows:
+        sample = ", ".join(str(i) for i in missing_prompt_file_rows[:10])
+        raise RuntimeError(
+            "Found rows with empty 'expansion_prompt_file' while scoring. "
+            f"Row indices (sample): {sample}"
+        )
+
+    known_prompt_files = set(jd_context_by_prompt_file.keys())
+    unknown_prompt_files = sorted(
+        {
+            normalize_whitespace(df.at[idx, "expansion_prompt_file"])
+            for idx in pending_indices
+            if normalize_whitespace(df.at[idx, "expansion_prompt_file"]) not in known_prompt_files
+        }
+    )
+    if unknown_prompt_files:
+        raise RuntimeError(
+            "No widened JD context found for expansion prompt file(s): "
+            f"{', '.join(unknown_prompt_files)}"
+        )
+
     # Fixed milestones: notify at 25%, 50%, 75% only (3 progress updates).
     milestone_pcts = [25, 50, 75]
     milestone_thresholds = set()
@@ -901,8 +941,6 @@ def score_candidates_csv(
         if 0 < threshold < pending_count:
             milestone_thresholds.add(threshold)
 
-    pending_indices = [idx for idx in df.index if pending[idx]]
-
     progress = tqdm(total=pending_count, desc="Scoring", unit="candidate")
     started_at = time.monotonic()
     usage_totals = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
@@ -910,10 +948,17 @@ def score_candidates_csv(
     completed_count = 0
 
     def _score_one(idx: int, text: str) -> Tuple[int, Any, str, str, Dict[str, int]]:
+        prompt_file = normalize_whitespace(df.at[idx, "expansion_prompt_file"])
+        jd_context = jd_context_by_prompt_file.get(prompt_file)
+        if not jd_context:
+            raise RuntimeError(
+                "No widened JD context found while scoring row "
+                f"{idx} (expansion_prompt_file='{prompt_file}')."
+            )
         score, reason, email, usage = get_ai_score(
             client=client,
             candidate_text=text,
-            jd_text=jd_text,
+            jd_text=jd_context,
             scorer_prompt_template=scorer_prompt_template,
             model=model,
         )
@@ -1158,6 +1203,10 @@ def run_pipeline_from_jd_text(
     slack_token: str,
 ) -> Dict[str, Any]:
     pipeline_start = time.monotonic()
+    removed_legacy_logs = cleanup_legacy_exa_query_logs()
+    if removed_legacy_logs:
+        print(f"Removed {removed_legacy_logs} legacy Exa query log file(s).")
+
     exa_query_prompt_template = read_text_file(args.exa_query_prompt_path)
     scorer_prompt_template = read_text_file(args.scorer_prompt_path)
 
@@ -1177,6 +1226,7 @@ def run_pipeline_from_jd_text(
     batch_dir = os.path.join(os.path.dirname(args.candidates_csv), "exa-batches")
     os.makedirs(batch_dir, exist_ok=True)
     total_query_gen_usage: Dict[str, int] = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+    jd_context_by_prompt_file: Dict[str, str] = {}
 
     for wp_idx, (wp_name, wp_text, wp_filename) in enumerate(widening_prompts, start=1):
         print(f"\n[{wp_idx}/{len(widening_prompts)}] Widening JD with '{wp_name}'...")
@@ -1189,6 +1239,7 @@ def run_pipeline_from_jd_text(
         )
         for key in total_query_gen_usage:
             total_query_gen_usage[key] += int(widen_usage.get(key, 0))
+        jd_context_by_prompt_file[wp_filename] = profile
 
         queries, qgen_usage = generate_exa_queries(
             client=client,
@@ -1214,6 +1265,7 @@ def run_pipeline_from_jd_text(
         batch_rows = flatten_exa_results_to_rows(
             batch_items,
             expansion_prompt_file=wp_filename,
+            widened_jd_context=profile,
         )
         batch_csv = os.path.join(batch_dir, f"batch-{wp_idx}.csv")
         pd.DataFrame(batch_rows).to_csv(batch_csv, index=False)
@@ -1225,12 +1277,8 @@ def run_pipeline_from_jd_text(
         del batch_result, batch_items, batch_rows
         gc.collect()
 
-    print(f"\nTotal exa queries: {len(all_queries)}, total rows: {total_csv_rows}")
-
-    logs_dir = args.debug_dir if args.debug else os.path.join(os.path.dirname(args.jd_path), "logs")
-    queries_log_path = write_queries_log_file(logs_dir, all_queries)
-    if args.debug:
-        print(f"Debug query log saved: {queries_log_path}")
+    queries_count = len(all_queries)
+    print(f"\nTotal exa queries: {queries_count}, total rows: {total_csv_rows}")
 
     maybe_stop(args.stop_after, "generate_queries")
     maybe_stop(args.stop_after, "exa_search")
@@ -1279,7 +1327,7 @@ def run_pipeline_from_jd_text(
         client=client,
         input_csv=args.dedup_csv,
         output_csv=args.scored_csv,
-        jd_text=jd_text,
+        jd_context_by_prompt_file=jd_context_by_prompt_file,
         scorer_prompt_template=scorer_prompt_template,
         model=args.scorer_model,
         progress_callback=on_score_progress,
@@ -1297,6 +1345,9 @@ def run_pipeline_from_jd_text(
     if "raw_json" in scored_df.columns:
         scored_df.drop(columns=["raw_json"], inplace=True)
     write_sheet_ready_csv(sheet_ready_csv, scored_df)
+    all_queries.clear()
+    jd_context_by_prompt_file.clear()
+    gc.collect()
 
     rows_scored = len(scored_df)
     total_input_tokens = int(total_query_gen_usage.get("input_tokens", 0)) + int(scoring_usage.get("input_tokens", 0))
@@ -1309,7 +1360,7 @@ def run_pipeline_from_jd_text(
         total_output_tokens = 3500 + (estimated_candidates * 120)
 
     cost_summary = compute_cost_summary(
-        exa_request_count=len(all_queries),
+        exa_request_count=queries_count,
         exa_pages_count=total_exa_results,
         openai_input_tokens=total_input_tokens,
         openai_output_tokens=total_output_tokens,
@@ -1344,14 +1395,14 @@ def run_pipeline_from_jd_text(
     maybe_stop(args.stop_after, "post")
 
     return {
-        "queries_count": len(all_queries),
+        "queries_count": queries_count,
         "total_results": total_exa_results,
         "rows_before_dedup": rows_before_dedup,
         "rows_after_dedup": rows_after_dedup,
         "rows_scored": rows_scored,
         "uploaded_file_id": file_id,
         "sheet_ready_csv": sheet_ready_csv,
-        "queries_log_path": queries_log_path,
+        "queries_log_path": None,
         "cost_summary": cost_summary,
     }
 

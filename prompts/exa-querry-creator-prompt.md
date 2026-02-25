@@ -23,9 +23,8 @@ profile, varying the arrangement in each iteration:
 10. Blend exclusion criteria with ideal candidate profile
 
 **Output Format:**
-- Each prompt: 150-180 words, dense single paragraph
-- Select a focused subset of components for each query — do NOT 
-  repeat every field in every prompt
+- Each prompt: 200-250 words, dense single paragraph
+- Select a focused subset of components for each query
 - Vary which components you include across the 10 prompts to 
   maximise search diversity
 - If the profile contains Primary and Secondary variants for a field, 
