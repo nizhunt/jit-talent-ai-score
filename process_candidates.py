@@ -7,6 +7,7 @@ import os
 import re
 import threading
 import time
+from collections import deque
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, as_completed, wait
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -528,6 +529,15 @@ def pick_first_non_empty(source: Dict[str, Any], keys: List[str]) -> str:
     return ""
 
 
+def pick_first_non_empty_from_sources(sources: List[Any], keys: List[str]) -> str:
+    for source in sources:
+        if isinstance(source, dict):
+            value = pick_first_non_empty(source, keys)
+            if value:
+                return value
+    return ""
+
+
 def split_name(name: str, explicit_first_name: str = "", explicit_last_name: str = "") -> Tuple[str, str]:
     first_name = normalize_whitespace(explicit_first_name)
     last_name = normalize_whitespace(explicit_last_name)
@@ -550,20 +560,53 @@ def normalize_list(value: Any) -> List[Any]:
     return []
 
 
+def extract_best_list_by_keys(source: Any, keys: List[str], max_depth: int = 4) -> List[Any]:
+    """Find the largest matching list across nested dict payloads."""
+    if not isinstance(source, dict):
+        return []
+
+    best: List[Any] = []
+    queue = deque([(source, 0)])
+    seen: set[int] = set()
+
+    while queue:
+        node, depth = queue.popleft()
+        node_id = id(node)
+        if node_id in seen:
+            continue
+        seen.add(node_id)
+
+        for key in keys:
+            value = node.get(key)
+            if isinstance(value, list) and len(value) > len(best):
+                best = value
+
+        if depth >= max_depth:
+            continue
+
+        for child in node.values():
+            if isinstance(child, dict):
+                queue.append((child, depth + 1))
+            elif isinstance(child, list):
+                for item in child:
+                    if isinstance(item, dict):
+                        queue.append((item, depth + 1))
+
+    return best
+
+
 def extract_work_history(item: Dict[str, Any]) -> List[Any]:
-    for key in ["workHistory", "experiences", "experience", "work_experience", "positions"]:
-        value = item.get(key)
-        if isinstance(value, list):
-            return value
-    return []
+    return extract_best_list_by_keys(
+        source=item,
+        keys=["workHistory", "work_history", "experiences", "experience", "work_experience", "positions"],
+    )
 
 
 def extract_education_history(item: Dict[str, Any]) -> List[Any]:
-    for key in ["educationHistory", "education", "educations"]:
-        value = item.get(key)
-        if isinstance(value, list):
-            return value
-    return []
+    return extract_best_list_by_keys(
+        source=item,
+        keys=["educationHistory", "education_history", "education", "educations"],
+    )
 
 
 def flatten_work_history(row: Dict[str, Any], work_history: List[Any]) -> None:
@@ -573,12 +616,34 @@ def flatten_work_history(row: Dict[str, Any], work_history: List[Any]) -> None:
     for idx, entry in enumerate(work_history, start=1):
         if isinstance(entry, dict):
             title = pick_first_non_empty(entry, ["title", "position", "role"])
-            company = pick_first_non_empty(entry, ["company", "companyName", "organization"])
             location = pick_first_non_empty(entry, ["location", "place"])
-            from_date = pick_first_non_empty(entry, ["from", "startDate", "start", "fromDate"])
-            to_date = pick_first_non_empty(entry, ["to", "endDate", "end", "toDate"])
             description = pick_first_non_empty(entry, ["description", "summary"])
-            company_id = pick_first_non_empty(entry, ["companyId", "company_id"])
+
+            company_data = entry.get("company")
+            company_sources: List[Any] = [entry]
+            if isinstance(company_data, dict):
+                company_sources.insert(0, company_data)
+            company = pick_first_non_empty_from_sources(
+                company_sources,
+                ["company", "name", "companyName", "organization"],
+            )
+            company_id = pick_first_non_empty_from_sources(
+                company_sources,
+                ["companyId", "company_id", "id", "entityId", "entity_id", "url"],
+            )
+
+            date_data = entry.get("dates")
+            date_sources: List[Any] = [entry]
+            if isinstance(date_data, dict):
+                date_sources.insert(0, date_data)
+            from_date = pick_first_non_empty_from_sources(
+                date_sources,
+                ["from", "startDate", "start", "fromDate", "from_date", "start_date"],
+            )
+            to_date = pick_first_non_empty_from_sources(
+                date_sources,
+                ["to", "endDate", "end", "toDate", "to_date", "end_date"],
+            )
         else:
             title = normalize_whitespace(entry)
             company = ""
