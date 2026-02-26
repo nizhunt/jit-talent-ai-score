@@ -2,6 +2,14 @@
 
 Slack `# JD` ingestion + Exa sourcing + AI scoring pipeline.
 
+Additional isolated workflow:
+- thread reply to a scored CSV message with a numeric threshold (for example `5`)
+- filters `AI Score >= threshold`
+- enriches emails via SaleSQL
+- verifies via Reoon then BounceBan
+- creates Instantly campaign and adds filtered leads
+- posts progress/final summary in the same Slack thread
+
 ## Deployment Architecture
 
 - Vercel (`app.py`) only handles Slack Events API:
@@ -28,6 +36,10 @@ Set these in both:
 - `SLACK_SIGNING_SECRET`
 - `SLACK_BOT_TOKEN` (preferred) or `SLACK_USER_TOKEN`
 - `REDIS_URL`
+- `SALESQL_API_KEY` (thread-reply enrichment workflow)
+- `REOON_API_KEY` (thread-reply enrichment workflow)
+- `BOUNCEBAN_API_KEY` (thread-reply enrichment workflow)
+- `INSTANTLY_API_KEY` (thread-reply enrichment workflow)
 
 Optional:
 - `SLACK_CHANNEL_ID` (default `C0AF5RGPMEW`)
@@ -43,6 +55,17 @@ Optional:
 - `SCORING_MAX_INFLIGHT_FACTOR` (default `2`; max in-flight scoring futures = `SCORING_CONCURRENT_CALLS * factor`)
 - `SCORE_PROGRESS_NOTIFY_EVERY` (default `50`)
 - `SCORE_INITIAL_SECONDS_PER_CANDIDATE` (default `2.5`)
+- `INSTANTLY_CAMPAIGN_TIMEZONE` (default `Asia/Kolkata`)
+- `INSTANTLY_CAMPAIGN_START_HOUR` (default `08:00`)
+- `INSTANTLY_CAMPAIGN_END_HOUR` (default `18:00`)
+- `INSTANTLY_CAMPAIGN_DURATION_DAYS` (default `30`)
+- `REOON_MAX_WAIT_SECONDS` (default `600`)
+- `REOON_POLL_INTERVAL_SECONDS` (default `15`)
+- `BOUNCEBAN_MAX_WAIT_SECONDS` (default `600`)
+- `BOUNCEBAN_POLL_INTERVAL_SECONDS` (default `15`)
+- `INSTANTLY_FAIL_FAST` (default `false`; abort immediately on first Instantly lead add error)
+- `THREAD_RESULT_STRICT` (default `true`; only allow thread-reply enrichment when thread root text matches result message prefix)
+- `RESULT_MESSAGE_PREFIX` (default `AI-scored candidates CSV for this JD`)
 
 ## Slack App Setup
 
@@ -53,6 +76,7 @@ Optional:
 4. OAuth scopes:
 - `chat:write`
 - `files:write`
+- `files:read` (required for thread-reply enrichment to download Slack CSV)
 - `channels:history`
 5. Reinstall app after scope/event changes.
 6. Invite bot to the target channel.

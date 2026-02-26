@@ -10,6 +10,7 @@ from rq import Worker
 
 from process_candidates import parse_args, post_slack_message, run_pipeline_from_jd_text
 from queueing import clear_event_seen, get_queue_name, get_redis_connection
+from thread_reply_enrichment import post_thread_reply_update, run_thread_reply_enrichment_pipeline
 
 
 def require_env(name: str) -> str:
@@ -81,6 +82,32 @@ def _notify_failure(channel_id: str, error_msg: str, event_id: Optional[str] = N
             print(f"[warn] failed to clear event dedup marker: {exc}")
 
 
+def _notify_thread_failure(
+    channel_id: str,
+    thread_ts: str,
+    error_msg: str,
+    event_id: Optional[str] = None,
+) -> None:
+    try:
+        slack_token = os.getenv("SLACK_BOT_TOKEN") or os.getenv("SLACK_USER_TOKEN")
+        if slack_token and channel_id and thread_ts:
+            short_error = (error_msg[:300] + "...") if len(error_msg) > 300 else error_msg
+            post_thread_reply_update(
+                slack_token=slack_token,
+                channel_id=channel_id,
+                thread_ts=thread_ts,
+                text=f"Thread enrichment failed: {short_error}\nReply with the threshold again to retry.",
+            )
+    except Exception as exc:
+        print(f"[warn] failed to post thread failure message to Slack: {exc}")
+
+    if event_id:
+        try:
+            clear_event_seen(event_id)
+        except Exception as exc:
+            print(f"[warn] failed to clear event dedup marker: {exc}")
+
+
 def process_jd_pipeline_job(
     *,
     jd_text: str,
@@ -119,6 +146,88 @@ def process_jd_pipeline_job(
         raise  # Re-raise so RQ marks the job as failed
     finally:
         cleanup_run_dir(run_dir)
+
+
+def process_thread_reply_enrichment_job(
+    *,
+    channel_id: str,
+    thread_ts: str,
+    reply_ts: Optional[str],
+    threshold: float,
+    event_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    load_dotenv()
+    _ = reply_ts  # reserved for compatibility with existing enqueued payloads
+
+    slack_token = os.getenv("SLACK_BOT_TOKEN") or require_env("SLACK_USER_TOKEN")
+    post_thread_reply_update(
+        slack_token=slack_token,
+        channel_id=channel_id,
+        thread_ts=thread_ts,
+        text=f"Received threshold `{threshold:g}`. Starting enrichment workflow...",
+    )
+
+    try:
+        result = run_thread_reply_enrichment_pipeline(
+            slack_token=slack_token,
+            channel_id=channel_id,
+            thread_ts=thread_ts,
+            threshold=threshold,
+            post_updates=True,
+        )
+    except Exception as exc:
+        _notify_thread_failure(
+            channel_id=channel_id,
+            thread_ts=thread_ts,
+            error_msg=str(exc),
+            event_id=event_id,
+        )
+        raise
+
+    if result.get("ignored") == "not_result_message_thread":
+        post_thread_reply_update(
+            slack_token=slack_token,
+            channel_id=channel_id,
+            thread_ts=thread_ts,
+            text=(
+                "Ignored: this thread is not a pipeline result CSV message thread.\n"
+                "Reply with a threshold in a thread where the root message is the scored CSV result."
+            ),
+        )
+        return {"ok": True, "event_id": event_id, "result": result}
+
+    lead_errors = result.get("lead_errors") or []
+    campaign_id = result.get("campaign_id")
+    if campaign_id:
+        summary_text = (
+            f"Thread enrichment complete.\n"
+            f"CSV: {result.get('csv_filename')}\n"
+            f"Threshold: {threshold:g}\n"
+            f"Candidates meeting threshold: {result.get('rows_meeting_threshold')}\n"
+            f"SaleSQL emails: {result.get('salesql_emails_found')}\n"
+            f"Reoon passed: {result.get('reoon_passed')}\n"
+            f"BounceBan deliverable: {result.get('bounceban_deliverable')}\n"
+            f"Instantly campaign: `{campaign_id}`\n"
+            f"Leads added: {result.get('leads_added')}\n"
+            f"Lead add errors: {len(lead_errors)}"
+        )
+    else:
+        summary_text = (
+            f"Thread enrichment completed with no campaign created.\n"
+            f"CSV: {result.get('csv_filename')}\n"
+            f"Threshold: {threshold:g}\n"
+            f"Candidates meeting threshold: {result.get('rows_meeting_threshold')}\n"
+            f"SaleSQL emails: {result.get('salesql_emails_found')}\n"
+            f"Reoon passed: {result.get('reoon_passed')}\n"
+            f"BounceBan deliverable: {result.get('bounceban_deliverable')}"
+        )
+    post_thread_reply_update(
+        slack_token=slack_token,
+        channel_id=channel_id,
+        thread_ts=thread_ts,
+        text=summary_text,
+    )
+    return {"ok": True, "event_id": event_id, "result": result}
 
 
 def parse_worker_args() -> argparse.Namespace:

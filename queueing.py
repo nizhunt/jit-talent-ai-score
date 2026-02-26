@@ -107,3 +107,23 @@ def enqueue_jd_pipeline_job(payload: Dict[str, Any]):
         raise QueueingUnavailableError(f"redis_error: {exc}") from exc
     except RedisError as exc:
         raise QueueingUnavailableError(f"redis_unavailable: {exc}") from exc
+
+
+def enqueue_thread_reply_enrichment_job(payload: Dict[str, Any]):
+    try:
+        queue = get_queue()
+        return queue.enqueue(
+            "worker.process_thread_reply_enrichment_job",
+            kwargs=payload,
+            job_timeout=int(os.getenv("RQ_JOB_TIMEOUT", "7200")),
+            result_ttl=int(os.getenv("RQ_RESULT_TTL", "86400")),
+            failure_ttl=int(os.getenv("RQ_FAILURE_TTL", "604800")),
+        )
+    except RuntimeError as exc:
+        raise QueueingUnavailableError(f"redis_config_error: {exc}") from exc
+    except ResponseError as exc:
+        if _is_upstash_request_limit_error(exc):
+            raise QueueingUnavailableError("redis_quota_exceeded") from exc
+        raise QueueingUnavailableError(f"redis_error: {exc}") from exc
+    except RedisError as exc:
+        raise QueueingUnavailableError(f"redis_unavailable: {exc}") from exc

@@ -15,9 +15,11 @@ from queueing import (
     QueueingUnavailableError,
     clear_event_seen,
     enqueue_jd_pipeline_job,
+    enqueue_thread_reply_enrichment_job,
     mark_event_seen,
     require_env,
 )
+from thread_reply_enrichment import parse_threshold_from_text
 
 
 load_dotenv()
@@ -143,12 +145,41 @@ async def slack_events(request: Request):
         return JSONResponse({"ok": True, "ignored": "wrong_channel"})
 
     text = event.get("text", "") or ""
-    if not is_jd_message(text):
-        return JSONResponse({"ok": True, "ignored": "not_jd_format"})
+    message_ts = event.get("ts")
+    thread_ts = event.get("thread_ts")
+    is_thread_reply = bool(thread_ts and message_ts and thread_ts != message_ts)
 
-    jd_text = extract_jd_text(text)
-    if not jd_text:
-        return JSONResponse({"ok": True, "ignored": "empty_jd"})
+    workflow_name: str
+    enqueue_fn: Any
+    job_payload: Dict[str, Any]
+
+    if is_jd_message(text):
+        jd_text = extract_jd_text(text)
+        if not jd_text:
+            return JSONResponse({"ok": True, "ignored": "empty_jd"})
+        workflow_name = "jd_pipeline"
+        enqueue_fn = enqueue_jd_pipeline_job
+        job_payload = {
+            "jd_text": jd_text,
+            "message_ts": message_ts,
+            "channel_id": channel_id,
+            "event_id": event_id,
+        }
+    elif is_thread_reply:
+        threshold = parse_threshold_from_text(text)
+        if threshold is None:
+            return JSONResponse({"ok": True, "ignored": "thread_reply_missing_threshold"})
+        workflow_name = "thread_reply_enrichment"
+        enqueue_fn = enqueue_thread_reply_enrichment_job
+        job_payload = {
+            "channel_id": channel_id,
+            "thread_ts": thread_ts,
+            "reply_ts": message_ts,
+            "threshold": threshold,
+            "event_id": event_id,
+        }
+    else:
+        return JSONResponse({"ok": True, "ignored": "not_jd_or_thread_reply"})
 
     dedup_enabled = _is_truthy(os.getenv("SLACK_EVENT_DEDUP_ENABLED"), default=True)
     event_marked_seen = False
@@ -163,16 +194,8 @@ async def slack_events(request: Request):
             return JSONResponse({"ok": True, "ignored": "duplicate_event"})
         event_marked_seen = True
 
-    message_ts = event.get("ts")
     try:
-        job = enqueue_jd_pipeline_job(
-            {
-                "jd_text": jd_text,
-                "message_ts": message_ts,
-                "channel_id": channel_id,
-                "event_id": event_id,
-            }
-        )
+        job = enqueue_fn(job_payload)
     except QueueingUnavailableError as exc:
         if event_marked_seen:
             clear_event_seen(event_id)
@@ -182,4 +205,4 @@ async def slack_events(request: Request):
             clear_event_seen(event_id)
         raise HTTPException(status_code=503, detail=f"queue_enqueue_failed: {exc}") from exc
 
-    return JSONResponse({"ok": True, "status": "queued", "job_id": job.id})
+    return JSONResponse({"ok": True, "status": "queued", "workflow": workflow_name, "job_id": job.id})

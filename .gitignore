@@ -54,3 +54,4 @@ Thumbs.db
 candidates*.csv
 exa-results.json
 debug/
+api-dry-run/
