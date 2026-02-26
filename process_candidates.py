@@ -1259,6 +1259,13 @@ def post_pipeline_update(slack_token: str, channel_id: str, text: str) -> None:
         print(f"[warn] failed to post progress update to Slack: {exc}")
 
 
+def format_jd_label(jd_name: str) -> str:
+    cleaned = normalize_whitespace(jd_name)
+    if not cleaned:
+        return ""
+    return f"[{cleaned}] "
+
+
 def run_pipeline_from_jd_text(
     *,
     jd_text: str,
@@ -1268,6 +1275,8 @@ def run_pipeline_from_jd_text(
     slack_token: str,
 ) -> Dict[str, Any]:
     pipeline_start = time.monotonic()
+    jd_name = normalize_whitespace(str(getattr(args, "jd_name", "") or ""))
+    jd_label = format_jd_label(jd_name)
     removed_legacy_logs = cleanup_legacy_exa_query_logs()
     if removed_legacy_logs:
         print(f"Removed {removed_legacy_logs} legacy Exa query log file(s).")
@@ -1382,7 +1391,7 @@ def run_pipeline_from_jd_text(
             slack_token=slack_token,
             channel_id=args.channel_id,
             text=(
-                f"Scoring: {pct:.0f}% ({processed}/{total}). "
+                f"{jd_label}Scoring: {pct:.0f}% ({processed}/{total}). "
                 f"ETA: {format_eta_seconds(float(payload.get('eta_seconds') or 0))} "
                 f"({float(payload.get('seconds_per_candidate') or 0):.2f}s/candidate)."
             ),
@@ -1441,8 +1450,10 @@ def run_pipeline_from_jd_text(
 
     elapsed = time.monotonic() - pipeline_start
     tally_block = "\n".join(score_tally_lines) if score_tally_lines else "  (no scores)"
+    jd_name_line = f"JD Name: {jd_name}\n" if jd_name else ""
     upload_comment = (
         f"AI-scored candidates CSV for this JD\n"
+        f"{jd_name_line}"
         f"Scored: {rows_scored}\n"
         f"After dedup: {rows_after_dedup} (from {rows_before_dedup} fetched)\n"
         f"Est. cost/candidate: ${cost_summary['per_scored_candidate']:.4f}\n"

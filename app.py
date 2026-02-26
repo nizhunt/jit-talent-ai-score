@@ -1,6 +1,7 @@
 import hashlib
 import hmac
 import os
+import re
 import sys
 import time
 from pathlib import Path
@@ -67,16 +68,24 @@ def _queue_unavailable_response(stage: str, detail: str) -> JSONResponse:
     return JSONResponse(payload, status_code=503)
 
 
-def is_jd_message(text: str) -> bool:
-    lines = text.splitlines()
-    if not lines:
-        return False
-    return lines[0].strip().lower() == "# jd"
-
-
 def extract_jd_text(text: str) -> str:
     lines = text.splitlines()
     return "\n".join(lines[1:]).strip()
+
+
+def parse_jd_message(text: str) -> Optional[Dict[str, str]]:
+    lines = text.splitlines()
+    if not lines:
+        return None
+
+    header = lines[0].strip()
+    match = re.match(r"(?i)^#\s*jd\b(?:\s*[:\-|]\s*|\s+)?(.*)$", header)
+    if not match:
+        return None
+
+    jd_name = (match.group(1) or "").strip()
+    jd_text = extract_jd_text(text)
+    return {"jd_name": jd_name, "jd_text": jd_text}
 
 
 def verify_slack_signature(signing_secret: str, timestamp: str, signature: str, body: bytes) -> bool:
@@ -153,14 +162,17 @@ async def slack_events(request: Request):
     enqueue_fn: Any
     job_payload: Dict[str, Any]
 
-    if is_jd_message(text):
-        jd_text = extract_jd_text(text)
+    jd_payload = parse_jd_message(text)
+    if jd_payload is not None:
+        jd_text = jd_payload["jd_text"]
+        jd_name = jd_payload.get("jd_name", "")
         if not jd_text:
             return JSONResponse({"ok": True, "ignored": "empty_jd"})
         workflow_name = "jd_pipeline"
         enqueue_fn = enqueue_jd_pipeline_job
         job_payload = {
             "jd_text": jd_text,
+            "jd_name": jd_name,
             "message_ts": message_ts,
             "channel_id": channel_id,
             "event_id": event_id,

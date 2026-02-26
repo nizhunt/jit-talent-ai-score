@@ -336,6 +336,9 @@ def _build_email_metadata_from_salesql(candidates: List[Dict[str, Any]], salesql
         company_name = (org.get("name") or fallback_company or "").strip()
 
         for email_obj in person.get("emails") or []:
+            email_type = (email_obj.get("type") or "").strip().lower()
+            if email_type != "direct":
+                continue
             email = _normalize_email(email_obj.get("email", ""))
             if not email:
                 continue

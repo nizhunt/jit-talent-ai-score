@@ -1,5 +1,6 @@
 import argparse
 import os
+import re
 import shutil
 import uuid
 from typing import Any, Dict, Optional
@@ -26,9 +27,24 @@ def _is_truthy(value: Optional[str], default: bool) -> bool:
     return value.strip().lower() not in {"0", "false", "no", "off", ""}
 
 
-def build_pipeline_args(channel_id: str) -> argparse.Namespace:
+def _slugify_identifier(value: str, *, default: str = "jd", max_length: int = 48) -> str:
+    cleaned = re.sub(r"[^a-zA-Z0-9]+", "-", (value or "").strip().lower()).strip("-")
+    if not cleaned:
+        return default
+    return cleaned[:max_length].strip("-") or default
+
+
+def _jd_prefix(jd_name: Optional[str]) -> str:
+    name = (jd_name or "").strip()
+    if not name:
+        return ""
+    return f"[{name}] "
+
+
+def build_pipeline_args(channel_id: str, jd_name: Optional[str] = None) -> argparse.Namespace:
     args = parse_args([])
     args.channel_id = channel_id
+    args.jd_name = (jd_name or "").strip()
     args.debug = False
     args.stop_after = None
 
@@ -38,14 +54,20 @@ def build_pipeline_args(channel_id: str) -> argparse.Namespace:
     args.jd_widening_prompts_dir = os.path.join(project_root, "prompts", "jd-widening-prompts")
 
     run_id = uuid.uuid4().hex[:12]
-    run_dir = os.path.join("/tmp", f"jit-talent-worker-{run_id}")
+    jd_slug = _slugify_identifier(args.jd_name, default="jd")
+    run_dir = os.path.join("/tmp", f"jit-talent-worker-{jd_slug}-{run_id}")
     os.makedirs(run_dir, exist_ok=True)
     args.run_dir = run_dir
 
     args.jd_path = os.path.join(run_dir, "jd.md")
-    args.candidates_csv = os.path.join(run_dir, "candidates.csv")
-    args.dedup_csv = os.path.join(run_dir, "candidates-dedup.csv")
-    args.scored_csv = os.path.join(run_dir, "candidates-scored.csv")
+    if args.jd_name:
+        args.candidates_csv = os.path.join(run_dir, f"candidates-{jd_slug}.csv")
+        args.dedup_csv = os.path.join(run_dir, f"candidates-dedup-{jd_slug}.csv")
+        args.scored_csv = os.path.join(run_dir, f"candidates-scored-{jd_slug}.csv")
+    else:
+        args.candidates_csv = os.path.join(run_dir, "candidates.csv")
+        args.dedup_csv = os.path.join(run_dir, "candidates-dedup.csv")
+        args.scored_csv = os.path.join(run_dir, "candidates-scored.csv")
     args.debug_dir = os.path.join(run_dir, "debug")
     return args
 
@@ -61,7 +83,12 @@ def cleanup_run_dir(run_dir: Optional[str]) -> None:
         print(f"[warn] failed to clean up run dir '{run_dir}': {exc}")
 
 
-def _notify_failure(channel_id: str, error_msg: str, event_id: Optional[str] = None) -> None:
+def _notify_failure(
+    channel_id: str,
+    error_msg: str,
+    event_id: Optional[str] = None,
+    jd_name: Optional[str] = None,
+) -> None:
     """Best-effort: post failure to Slack and clear event dedup so JD can be retried."""
     try:
         slack_token = os.getenv("SLACK_BOT_TOKEN") or os.getenv("SLACK_USER_TOKEN")
@@ -70,7 +97,7 @@ def _notify_failure(channel_id: str, error_msg: str, event_id: Optional[str] = N
             post_slack_message(
                 slack_token=slack_token,
                 channel_id=channel_id,
-                text=f"⚠️ Pipeline failed: {short_error}\nPlease re-post the JD to retry.",
+                text=f"{_jd_prefix(jd_name)}⚠️ Pipeline failed: {short_error}\nPlease re-post the JD to retry.",
             )
     except Exception as exc:
         print(f"[warn] failed to post failure message to Slack: {exc}")
@@ -113,6 +140,7 @@ def process_jd_pipeline_job(
     jd_text: str,
     message_ts: Optional[str],
     channel_id: str,
+    jd_name: Optional[str] = None,
     event_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     load_dotenv()
@@ -126,12 +154,12 @@ def process_jd_pipeline_job(
     post_slack_message(
         slack_token=slack_token,
         channel_id=channel_id,
-        text="Thanks for sharing the JD. Processing has started.",
+        text=f"{_jd_prefix(jd_name)}Thanks for sharing the JD. Processing has started.",
     )
 
     try:
         client = OpenAI(api_key=openai_api_key)
-        args = build_pipeline_args(channel_id=channel_id)
+        args = build_pipeline_args(channel_id=channel_id, jd_name=jd_name)
         run_dir = getattr(args, "run_dir", None)
         result = run_pipeline_from_jd_text(
             jd_text=jd_text,
@@ -140,9 +168,9 @@ def process_jd_pipeline_job(
             exa_api_key=exa_api_key,
             slack_token=slack_token,
         )
-        return {"ok": True, "event_id": event_id, "result": result}
+        return {"ok": True, "event_id": event_id, "jd_name": jd_name, "result": result}
     except Exception as exc:
-        _notify_failure(channel_id=channel_id, error_msg=str(exc), event_id=event_id)
+        _notify_failure(channel_id=channel_id, error_msg=str(exc), event_id=event_id, jd_name=jd_name)
         raise  # Re-raise so RQ marks the job as failed
     finally:
         cleanup_run_dir(run_dir)

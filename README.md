@@ -5,7 +5,7 @@ Slack `# JD` ingestion + Exa sourcing + AI scoring pipeline.
 Additional isolated workflow:
 - thread reply to a scored CSV message with a numeric threshold (for example `5`)
 - filters `AI Score >= threshold`
-- enriches emails via SaleSQL
+- enriches emails via SaleSQL (Direct emails only)
 - verifies via Reoon then BounceBan
 - creates Instantly campaign and adds filtered leads
 - posts progress/final summary in the same Slack thread
@@ -23,6 +23,18 @@ Additional isolated workflow:
   - fetch Exa results
   - CSV + dedup + score
   - post step updates + final CSV back to Slack
+
+## JD Message Format
+
+Supported header formats:
+- `# JD` (existing format)
+- `# JD <name>` (new, optional name)
+- `# JD: <name>` and `# JD | <name>` are also accepted
+
+When a name is provided, it is used in:
+- processing/progress/failure Slack messages
+- final upload comment (`JD Name: ...`)
+- output CSV filenames inside the worker run (slugged)
 
 ## Required Environment Variables
 
