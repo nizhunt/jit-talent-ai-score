@@ -1106,7 +1106,7 @@ def compute_cost_summary(
     exa_pages_count: int,
     openai_input_tokens: int,
     openai_output_tokens: int,
-    scored_count: int,
+    qualified_count: int,
     used_assumptions: bool,
 ) -> Dict[str, Any]:
     exa_search_per_1000 = float(os.getenv("EXA_SEARCH_COST_PER_1000_REQUESTS", "25"))
@@ -1123,14 +1123,17 @@ def compute_cost_summary(
     openai_total = openai_input_cost + openai_output_cost
 
     total_cost = exa_total + openai_total
-    divisor = max(1, scored_count)
-    per_scored = total_cost / divisor
+    divisor = max(1, qualified_count)
+    per_find = total_cost / divisor
 
     return {
         "exa_total": exa_total,
         "openai_total": openai_total,
         "total_cost": total_cost,
-        "per_scored_candidate": per_scored,
+        "qualified_count": qualified_count,
+        "per_find": per_find,
+        # Backward-compatible alias for callers that still read this key.
+        "per_scored_candidate": per_find,
         "used_assumptions": used_assumptions,
     }
 
@@ -1209,6 +1212,13 @@ def build_score_tally_lines(scored_df: pd.DataFrame) -> List[str]:
 
     tally = numeric_scores.astype(int).value_counts().sort_index(ascending=False)
     return [f"  Score {int(score_val)}: {int(count)}" for score_val, count in tally.items()]
+
+
+def count_qualified_finds(scored_df: pd.DataFrame, minimum_score: float = 5.0) -> int:
+    if "ai-score" not in scored_df.columns:
+        return 0
+    numeric_scores = pd.to_numeric(scored_df["ai-score"], errors="coerce")
+    return int((numeric_scores >= minimum_score).sum())
 
 
 def format_eta_seconds(eta_seconds: float) -> str:
@@ -1424,6 +1434,7 @@ def run_pipeline_from_jd_text(
     gc.collect()
 
     rows_scored = len(scored_df)
+    qualified_finds = count_qualified_finds(scored_df, minimum_score=5.0)
     total_input_tokens = int(total_query_gen_usage.get("input_tokens", 0)) + int(scoring_usage.get("input_tokens", 0))
     total_output_tokens = int(total_query_gen_usage.get("output_tokens", 0)) + int(scoring_usage.get("output_tokens", 0))
     used_assumptions = False
@@ -1438,7 +1449,7 @@ def run_pipeline_from_jd_text(
         exa_pages_count=total_exa_results,
         openai_input_tokens=total_input_tokens,
         openai_output_tokens=total_output_tokens,
-        scored_count=rows_scored,
+        qualified_count=qualified_finds,
         used_assumptions=used_assumptions,
     )
 
@@ -1451,12 +1462,17 @@ def run_pipeline_from_jd_text(
     elapsed = time.monotonic() - pipeline_start
     tally_block = "\n".join(score_tally_lines) if score_tally_lines else "  (no scores)"
     jd_name_line = f"JD Name: {jd_name}\n" if jd_name else ""
+    if qualified_finds > 0:
+        cost_per_find_line = f"Est. cost/find (score >= 5): ${cost_summary['per_find']:.4f}\n"
+    else:
+        cost_per_find_line = "Est. cost/find (score >= 5): N/A (no candidates scored 5+)\n"
     upload_comment = (
         f"AI-scored candidates CSV for this JD\n"
         f"{jd_name_line}"
         f"Scored: {rows_scored}\n"
+        f"Finds (score >= 5): {qualified_finds}\n"
         f"After dedup: {rows_after_dedup} (from {rows_before_dedup} fetched)\n"
-        f"Est. cost/candidate: ${cost_summary['per_scored_candidate']:.4f}\n"
+        f"{cost_per_find_line}"
         f"Total time: {format_eta_seconds(elapsed)}\n\n"
         f"Score Tally:\n{tally_block}"
     )
