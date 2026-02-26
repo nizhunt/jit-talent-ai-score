@@ -153,6 +153,7 @@ def _to_float(value: Any) -> Optional[float]:
 
 
 def _pick_first(row: Dict[str, Any], keys: List[str]) -> str:
+    # Exact-key pass first (fast path).
     for key in keys:
         value = row.get(key)
         if value is None:
@@ -160,6 +161,29 @@ def _pick_first(row: Dict[str, Any], keys: List[str]) -> str:
         text = str(value).strip()
         if text:
             return text
+
+    # Fuzzy pass: case-insensitive and punctuation-insensitive header matching.
+    def _normalize_key(raw: str) -> str:
+        return re.sub(r"[^a-z0-9]+", "", (raw or "").strip().lower())
+
+    normalized_values: Dict[str, str] = {}
+    for raw_key, raw_value in row.items():
+        if raw_value is None:
+            continue
+        text = str(raw_value).strip()
+        if not text:
+            continue
+        nkey = _normalize_key(str(raw_key))
+        if nkey and nkey not in normalized_values:
+            normalized_values[nkey] = text
+
+    for key in keys:
+        nkey = _normalize_key(key)
+        if not nkey:
+            continue
+        value = normalized_values.get(nkey, "")
+        if value:
+            return value
     return ""
 
 
