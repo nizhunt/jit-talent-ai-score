@@ -503,7 +503,7 @@ def _poll_bounceban_completion(bounceban_api_key: str, task_id: str) -> None:
         status = (body.get("status") or "").lower()
         if status in {"finished", "completed"}:
             return
-        if status not in {"pending", "running", "processing"}:
+        if status not in {"pending", "running", "processing", "verifying"}:
             raise RuntimeError(f"Unexpected BounceBan status: {body}")
         if time.monotonic() >= deadline:
             raise RuntimeError(f"Timed out waiting for BounceBan task {task_id}.")
