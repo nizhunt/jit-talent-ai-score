@@ -78,6 +78,7 @@ Optional:
 - `INSTANTLY_FAIL_FAST` (default `false`; abort immediately on first Instantly lead add error)
 - `THREAD_RESULT_STRICT` (default `true`; only allow thread-reply enrichment when thread root text matches result message prefix)
 - `RESULT_MESSAGE_PREFIX` (default `AI-scored candidates CSV for this JD`)
+- `THREAD_ENRICHMENT_VERBOSE_UPDATES` (default `false`; if true, posts intermediate stage updates in thread)
 
 ## Slack App Setup
 

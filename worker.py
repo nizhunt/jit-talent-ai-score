@@ -188,6 +188,7 @@ def process_thread_reply_enrichment_job(
     _ = reply_ts  # reserved for compatibility with existing enqueued payloads
 
     slack_token = os.getenv("SLACK_BOT_TOKEN") or require_env("SLACK_USER_TOKEN")
+    verbose_updates = _is_truthy(os.getenv("THREAD_ENRICHMENT_VERBOSE_UPDATES"), default=False)
     post_thread_reply_update(
         slack_token=slack_token,
         channel_id=channel_id,
@@ -201,7 +202,7 @@ def process_thread_reply_enrichment_job(
             channel_id=channel_id,
             thread_ts=thread_ts,
             threshold=threshold,
-            post_updates=True,
+            post_updates=verbose_updates,
         )
     except Exception as exc:
         _notify_thread_failure(
