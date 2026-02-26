@@ -339,6 +339,9 @@ def _build_email_metadata_from_salesql(candidates: List[Dict[str, Any]], salesql
             email_type = (email_obj.get("type") or "").strip().lower()
             if email_type != "direct":
                 continue
+            is_valid = email_obj.get("is_valid") is True
+            if not is_valid:
+                continue
             email = _normalize_email(email_obj.get("email", ""))
             if not email:
                 continue

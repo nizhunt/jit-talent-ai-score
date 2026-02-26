@@ -5,7 +5,7 @@ Slack `# JD` ingestion + Exa sourcing + AI scoring pipeline.
 Additional isolated workflow:
 - thread reply to a scored CSV message with a numeric threshold (for example `5`)
 - filters `AI Score >= threshold`
-- enriches emails via SaleSQL (Direct emails only)
+- enriches emails via SaleSQL (only emails where `type=Direct` and `is_valid=true`)
 - verifies via Reoon then BounceBan
 - creates Instantly campaign and adds filtered leads
 - posts progress/final summary in the same Slack thread
