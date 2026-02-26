@@ -452,7 +452,7 @@ def _poll_reoon_task(reoon_api_key: str, task_id: int) -> Dict[str, Any]:
         status = (body.get("status") or "").lower()
         if status == "completed":
             return body
-        if status not in {"running", "queued", "processing"}:
+        if status not in {"waiting", "running", "queued", "processing"}:
             raise RuntimeError(f"Unexpected Reoon status: {body}")
         if time.monotonic() >= deadline:
             raise RuntimeError(f"Timed out waiting for Reoon task {task_id}.")
