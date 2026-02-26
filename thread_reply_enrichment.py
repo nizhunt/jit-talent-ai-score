@@ -342,6 +342,16 @@ def _load_candidates_from_csv(csv_path: Path) -> List[Dict[str, Any]]:
                     "linkedin_url": linkedin,
                     "first_name": _pick_first(row, ["First Name", "first_name", "firstname"]),
                     "last_name": _pick_first(row, ["Last Name", "last_name", "lastname"]),
+                    "generated_email": _pick_first(
+                        row,
+                        [
+                            "AI Email",
+                            "ai-email",
+                            "ai_email",
+                            "Generated Email",
+                            "generated_email",
+                        ],
+                    ),
                     "company_name": _pick_first(
                         row,
                         [
@@ -389,11 +399,13 @@ def _build_email_metadata_from_salesql(candidates: List[Dict[str, Any]], salesql
         fallback_first = candidate.get("first_name", "")
         fallback_last = candidate.get("last_name", "")
         fallback_company = candidate.get("company_name", "")
+        fallback_generated_email = candidate.get("generated_email", "")
 
         first_name = (person.get("first_name") or fallback_first or "").strip()
         last_name = (person.get("last_name") or fallback_last or "").strip()
         org = person.get("organization") or {}
         company_name = (org.get("name") or fallback_company or "").strip()
+        generated_email = (fallback_generated_email or "").strip()
 
         for email_obj in person.get("emails") or []:
             email_type = (email_obj.get("type") or "").strip().lower()
@@ -416,6 +428,7 @@ def _build_email_metadata_from_salesql(candidates: List[Dict[str, Any]], salesql
                 "last_name": last_name,
                 "company_name": company_name,
                 "linkedin_url": linkedin_url,
+                "generated_email": generated_email,
             }
     return metadata_by_email
 
@@ -594,6 +607,8 @@ def _add_lead_to_instantly_campaign(
     lead: Dict[str, str],
 ) -> Dict[str, Any]:
     linkedin_url = lead.get("linkedin_url", "")
+    generated_email = (lead.get("generated_email") or "").strip()
+    personalization = generated_email if generated_email else (f"LinkedIn: {linkedin_url}" if linkedin_url else "")
     payload = {
         "email": lead["email"],
         "campaign": campaign_id,
@@ -601,7 +616,7 @@ def _add_lead_to_instantly_campaign(
         "last_name": lead.get("last_name", ""),
         "company_name": _clean_company_name(lead.get("company_name", "")),
         "website": linkedin_url,
-        "personalization": f"LinkedIn: {linkedin_url}" if linkedin_url else "",
+        "personalization": personalization,
     }
     response = requests.post(
         INSTANTLY_LEAD_CREATE_URL,

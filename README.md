@@ -8,6 +8,7 @@ Additional isolated workflow:
 - enriches emails via SaleSQL (only emails where `type=Direct` and valid: `is_valid=true` or fallback `status=Valid`)
 - verifies via Reoon then BounceBan
 - creates Instantly campaign and adds filtered leads
+- sets Instantly lead `personalization` from CSV `AI Email` when present (fallback: LinkedIn line)
 - posts progress/final summary in the same Slack thread
 
 ## Deployment Architecture
