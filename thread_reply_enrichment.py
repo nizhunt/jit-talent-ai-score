@@ -358,14 +358,20 @@ def _load_candidates_from_csv(csv_path: Path) -> List[Dict[str, Any]]:
     return candidates
 
 
-def _salesql_enrich(salesql_api_key: str, linkedin_url: str) -> Dict[str, Any]:
+def _salesql_enrich(salesql_api_key: str, linkedin_url: str) -> Optional[Dict[str, Any]]:
     response = requests.get(
         SALESQL_ENRICH_URL,
         params={"linkedin_url": linkedin_url, "api_key": salesql_api_key},
         timeout=60,
     )
+    # Some LinkedIn profiles are simply not found by SaleSQL. Skip those entries.
+    if response.status_code in {400, 404, 422}:
+        return None
     response.raise_for_status()
-    return response.json()
+    body = response.json()
+    if not isinstance(body, dict):
+        return None
+    return body
 
 
 def _build_email_metadata_from_salesql(candidates: List[Dict[str, Any]], salesql_api_key: str) -> Dict[str, Dict[str, str]]:
@@ -377,6 +383,8 @@ def _build_email_metadata_from_salesql(candidates: List[Dict[str, Any]], salesql
             continue
         seen_linkedin_urls.add(linkedin_url)
         person = _salesql_enrich(salesql_api_key=salesql_api_key, linkedin_url=linkedin_url)
+        if not person:
+            continue
 
         fallback_first = candidate.get("first_name", "")
         fallback_last = candidate.get("last_name", "")
