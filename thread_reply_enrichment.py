@@ -6,7 +6,7 @@ import time
 from datetime import date, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import urljoin, urlsplit, urlunsplit
 
 import requests
 
@@ -271,9 +271,37 @@ def _is_result_message_thread_root(message: Dict[str, Any], csv_file: Dict[str, 
 
 
 def _download_slack_file(slack_token: str, url: str, destination: Path) -> None:
-    response = requests.get(url, headers=_slack_headers(slack_token), timeout=120)
-    response.raise_for_status()
-    destination.write_bytes(response.content)
+    current_url = url
+    max_redirects = 8
+
+    for _ in range(max_redirects):
+        response = requests.get(
+            current_url,
+            headers=_slack_headers(slack_token),
+            timeout=120,
+            allow_redirects=False,
+        )
+
+        if response.status_code in {301, 302, 303, 307, 308}:
+            location = response.headers.get("Location")
+            if not location:
+                raise RuntimeError("Slack file download redirect missing Location header.")
+            current_url = urljoin(current_url, location)
+            continue
+
+        response.raise_for_status()
+        content = response.content
+        content_type = (response.headers.get("Content-Type") or "").lower()
+        sniff = content[:300].decode("utf-8", errors="ignore").lower()
+        if "text/html" in content_type or "<html" in sniff or "<!doctype html" in sniff:
+            raise RuntimeError(
+                "Slack file download returned HTML instead of CSV. "
+                "Ensure Slack app has files:read scope and was reinstalled."
+            )
+        destination.write_bytes(content)
+        return
+
+    raise RuntimeError("Slack file download exceeded redirect limit.")
 
 
 def _load_candidates_from_csv(csv_path: Path) -> List[Dict[str, Any]]:
