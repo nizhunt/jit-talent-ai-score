@@ -36,6 +36,7 @@ When a name is provided, it is used in:
 - processing/progress/failure Slack messages
 - final upload comment (`JD Name: ...`)
 - output CSV filenames inside the worker run (slugged)
+- Instantly campaign name during thread-reply enrichment
 
 ## Required Environment Variables
 

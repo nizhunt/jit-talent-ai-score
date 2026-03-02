@@ -227,16 +227,19 @@ def process_thread_reply_enrichment_job(
 
     lead_errors = result.get("lead_errors") or []
     campaign_id = result.get("campaign_id")
+    campaign_name = result.get("campaign_name")
     if campaign_id:
         summary_text = (
             f"Thread enrichment complete.\n"
             f"CSV: {result.get('csv_filename')}\n"
+            f"JD Name: {result.get('jd_name') or 'N/A'}\n"
             f"Threshold: {threshold:g}\n"
             f"Rows with score+LinkedIn parsed: {result.get('rows_with_score_and_linkedin')}\n"
             f"Candidates meeting threshold: {result.get('rows_meeting_threshold')}\n"
             f"SaleSQL emails: {result.get('salesql_emails_found')}\n"
             f"Reoon passed: {result.get('reoon_passed')}\n"
             f"BounceBan deliverable: {result.get('bounceban_deliverable')}\n"
+            f"Instantly campaign name: {campaign_name or 'N/A'}\n"
             f"Instantly campaign: `{campaign_id}`\n"
             f"Leads added: {result.get('leads_added')}\n"
             f"Lead add errors: {len(lead_errors)}"
@@ -245,6 +248,7 @@ def process_thread_reply_enrichment_job(
         summary_text = (
             f"Thread enrichment completed with no campaign created.\n"
             f"CSV: {result.get('csv_filename')}\n"
+            f"JD Name: {result.get('jd_name') or 'N/A'}\n"
             f"Threshold: {threshold:g}\n"
             f"Rows with score+LinkedIn parsed: {result.get('rows_with_score_and_linkedin')}\n"
             f"Candidates meeting threshold: {result.get('rows_meeting_threshold')}\n"

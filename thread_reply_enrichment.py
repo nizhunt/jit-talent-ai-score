@@ -255,6 +255,17 @@ def _extract_csv_file_info_from_message(message: Dict[str, Any]) -> Dict[str, An
     raise RuntimeError("Thread root message does not include a CSV file.")
 
 
+def _extract_jd_name_from_message(message: Dict[str, Any]) -> str:
+    text = (message.get("text") or "").strip()
+    if not text:
+        return ""
+
+    match = re.search(r"(?im)^JD Name:\s*(.+?)\s*$", text)
+    if not match:
+        return ""
+    return (match.group(1) or "").strip()
+
+
 def _is_result_message_thread_root(message: Dict[str, Any], csv_file: Dict[str, Any]) -> bool:
     text = (message.get("text") or "").strip().lower()
     prefix = os.getenv("RESULT_MESSAGE_PREFIX", RESULT_MESSAGE_PREFIX_DEFAULT).strip().lower()
@@ -550,7 +561,14 @@ def _filter_bounceban_deliverables(dump_payload: Dict[str, Any], input_emails: L
     return deliverable
 
 
-def _create_instantly_campaign(instantly_api_key: str, threshold: float) -> str:
+def _build_instantly_campaign_name(*, jd_name: str, threshold: float, start_date: date) -> str:
+    clean_jd_name = (jd_name or "").strip()
+    if clean_jd_name:
+        return clean_jd_name
+    return f"JIT Outreach Threshold {threshold:g} ({start_date.isoformat()})"
+
+
+def _create_instantly_campaign(instantly_api_key: str, threshold: float, jd_name: str = "") -> Dict[str, str]:
     timezone = os.getenv("INSTANTLY_CAMPAIGN_TIMEZONE", "Asia/Kolkata")
     start_hour = os.getenv("INSTANTLY_CAMPAIGN_START_HOUR", "08:00")
     end_hour = os.getenv("INSTANTLY_CAMPAIGN_END_HOUR", "18:00")
@@ -558,7 +576,7 @@ def _create_instantly_campaign(instantly_api_key: str, threshold: float) -> str:
 
     start_date = date.today()
     end_date = start_date + timedelta(days=max(1, duration_days))
-    campaign_name = f"JIT Outreach Threshold {threshold:g} ({start_date.isoformat()})"
+    campaign_name = _build_instantly_campaign_name(jd_name=jd_name, threshold=threshold, start_date=start_date)
 
     payload = {
         "name": campaign_name,
@@ -598,7 +616,7 @@ def _create_instantly_campaign(instantly_api_key: str, threshold: float) -> str:
     campaign_id = body.get("id")
     if not campaign_id:
         raise RuntimeError(f"Instantly campaign creation failed: {body}")
-    return str(campaign_id)
+    return {"id": str(campaign_id), "name": campaign_name}
 
 
 def _add_lead_to_instantly_campaign(
@@ -658,12 +676,15 @@ def run_thread_reply_enrichment_pipeline(
 
     root_message = _get_thread_root_message(slack_token=slack_token, channel_id=channel_id, thread_ts=thread_ts)
     csv_file = _extract_csv_file_info_from_message(root_message)
+    jd_name = _extract_jd_name_from_message(root_message)
     if not _is_result_message_thread_root(root_message, csv_file):
         return {
             "ignored": "not_result_message_thread",
             "threshold": threshold,
             "csv_filename": csv_file.get("name") or "unknown.csv",
+            "jd_name": jd_name,
             "campaign_id": None,
+            "campaign_name": None,
             "leads_added": 0,
             "lead_errors": [],
         }
@@ -683,12 +704,14 @@ def run_thread_reply_enrichment_pipeline(
             return {
                 "threshold": threshold,
                 "csv_filename": csv_file.get("name") or "scored.csv",
+                "jd_name": jd_name,
                 "rows_with_score_and_linkedin": len(all_candidates),
                 "rows_meeting_threshold": 0,
                 "salesql_emails_found": 0,
                 "reoon_passed": 0,
                 "bounceban_deliverable": 0,
                 "campaign_id": None,
+                "campaign_name": None,
                 "leads_added": 0,
                 "lead_errors": [],
             }
@@ -704,12 +727,14 @@ def run_thread_reply_enrichment_pipeline(
             return {
                 "threshold": threshold,
                 "csv_filename": csv_file.get("name") or "scored.csv",
+                "jd_name": jd_name,
                 "rows_with_score_and_linkedin": len(all_candidates),
                 "rows_meeting_threshold": len(threshold_candidates),
                 "salesql_emails_found": 0,
                 "reoon_passed": 0,
                 "bounceban_deliverable": 0,
                 "campaign_id": None,
+                "campaign_name": None,
                 "leads_added": 0,
                 "lead_errors": [],
             }
@@ -723,12 +748,14 @@ def run_thread_reply_enrichment_pipeline(
             return {
                 "threshold": threshold,
                 "csv_filename": csv_file.get("name") or "scored.csv",
+                "jd_name": jd_name,
                 "rows_with_score_and_linkedin": len(all_candidates),
                 "rows_meeting_threshold": len(threshold_candidates),
                 "salesql_emails_found": len(all_emails),
                 "reoon_passed": 0,
                 "bounceban_deliverable": 0,
                 "campaign_id": None,
+                "campaign_name": None,
                 "leads_added": 0,
                 "lead_errors": [],
             }
@@ -745,18 +772,26 @@ def run_thread_reply_enrichment_pipeline(
             return {
                 "threshold": threshold,
                 "csv_filename": csv_file.get("name") or "scored.csv",
+                "jd_name": jd_name,
                 "rows_with_score_and_linkedin": len(all_candidates),
                 "rows_meeting_threshold": len(threshold_candidates),
                 "salesql_emails_found": len(all_emails),
                 "reoon_passed": len(reoon_passed),
                 "bounceban_deliverable": 0,
                 "campaign_id": None,
+                "campaign_name": None,
                 "leads_added": 0,
                 "lead_errors": [],
             }
 
         _update(f"BounceBan deliverable: {len(deliverable)}. Creating Instantly campaign...")
-        campaign_id = _create_instantly_campaign(instantly_api_key=instantly_api_key, threshold=threshold)
+        campaign = _create_instantly_campaign(
+            instantly_api_key=instantly_api_key,
+            threshold=threshold,
+            jd_name=jd_name,
+        )
+        campaign_id = campaign["id"]
+        campaign_name = campaign["name"]
 
         lead_errors: List[str] = []
         added_count = 0
@@ -778,12 +813,14 @@ def run_thread_reply_enrichment_pipeline(
         return {
             "threshold": threshold,
             "csv_filename": csv_file.get("name") or "scored.csv",
+            "jd_name": jd_name,
             "rows_with_score_and_linkedin": len(all_candidates),
             "rows_meeting_threshold": len(threshold_candidates),
             "salesql_emails_found": len(all_emails),
             "reoon_passed": len(reoon_passed),
             "bounceban_deliverable": len(deliverable),
             "campaign_id": campaign_id,
+            "campaign_name": campaign_name,
             "leads_added": added_count,
             "lead_errors": lead_errors,
         }
