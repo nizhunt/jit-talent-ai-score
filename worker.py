@@ -229,6 +229,7 @@ def process_thread_reply_enrichment_job(
     campaign_id = result.get("campaign_id")
     campaign_name = result.get("campaign_name")
     if campaign_id:
+        campaign_analytics_url = f"https://app.instantly.ai/app/campaign/{campaign_id}/analytics"
         summary_text = (
             f"Thread enrichment complete.\n"
             f"CSV: {result.get('csv_filename')}\n"
@@ -240,7 +241,7 @@ def process_thread_reply_enrichment_job(
             f"Reoon passed: {result.get('reoon_passed')}\n"
             f"BounceBan deliverable: {result.get('bounceban_deliverable')}\n"
             f"Instantly campaign name: {campaign_name or 'N/A'}\n"
-            f"Instantly campaign: `{campaign_id}`\n"
+            f"Instantly campaign: {campaign_analytics_url}\n"
             f"Leads added: {result.get('leads_added')}\n"
             f"Lead add errors: {len(lead_errors)}"
         )
