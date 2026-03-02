@@ -5,4 +5,4 @@ nixPkgs = ["python313", "gcc"]
 cmds = ["python -m pip install --upgrade pip", "pip install -r requirements.txt"]
 
 [start]
-cmd = "python -u worker.py"
+cmd = "./scripts/start-jd-worker.sh"

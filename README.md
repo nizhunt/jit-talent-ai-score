@@ -57,7 +57,10 @@ Set these in both:
 
 Optional:
 - `SLACK_CHANNEL_ID` (default `C0AF5RGPMEW`)
-- `RQ_QUEUE_NAME` (default `jd-pipeline`)
+- `RQ_JD_QUEUE_NAME` (default `jd-pipeline`)
+- `RQ_REPLY_QUEUE_NAME` (default `reply-enrichment`)
+- `RQ_QUEUE_NAME` (legacy fallback for JD queue name only)
+- `RQ_WORKER_QUEUE_TYPE` (default `jd`; worker can consume `jd`, `reply`, or `all`)
 - `RQ_JOB_TIMEOUT` (default `7200`)
 - `RQ_WITH_SCHEDULER` (default `false`; keep disabled unless you use scheduled RQ jobs)
 - `SLACK_EVENT_TTL_SECONDS` (default `86400`)
@@ -116,9 +119,24 @@ For Railway, this repo includes `nixpacks.toml` so build installs dependencies a
 python worker.py
 ```
 
+Dedicated workers:
+
+```bash
+python worker.py --queue-type jd
+python worker.py --queue-type reply
+```
+
+Recommended production shape:
+- run `2` JD workers: `python worker.py --queue-type jd`
+- run `1` reply worker: `python worker.py --queue-type reply`
+
 Railway expected commands:
 - Build: `pip install -r requirements.txt` (or leave default with `nixpacks.toml`)
-- Start: `python -u worker.py`
+- Start: `python -u worker.py --queue-type jd`
+
+Helper scripts committed in repo:
+- `./scripts/start-jd-worker.sh`
+- `./scripts/start-reply-worker.sh`
 
 For one-shot processing (CI/manual):
 
@@ -145,6 +163,24 @@ Run worker:
 ```bash
 python worker.py
 ```
+
+## Railway Setup
+
+Railway will not create the extra worker service or replica count automatically from this repo push alone.
+You need one-time service configuration in Railway after deploy.
+
+Recommended layout:
+- Service `jit-worker-jd`
+  - Start command: `./scripts/start-jd-worker.sh`
+  - Replicas: `2`
+- Service `jit-worker-reply`
+  - Start command: `./scripts/start-reply-worker.sh`
+  - Replicas: `1`
+
+Notes:
+- `nixpacks.toml` now defaults to the JD worker script, so an existing single Railway worker service will continue as a JD worker.
+- The reply worker should be a separate Railway service that points to the same repo and same env vars, but uses the reply start command above.
+- Replica count is configured in Railway service settings, not in this repo.
 
 Endpoints:
 - `GET /healthz`

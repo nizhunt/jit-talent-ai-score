@@ -3,14 +3,14 @@ import os
 import re
 import shutil
 import uuid
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from dotenv import load_dotenv
 from openai import OpenAI
 from rq import Worker
 
 from process_candidates import parse_args, post_slack_message, run_pipeline_from_jd_text
-from queueing import clear_event_seen, get_queue_name, get_redis_connection
+from queueing import clear_event_seen, get_jd_queue_name, get_redis_connection, get_reply_queue_name
 from thread_reply_enrichment import post_thread_reply_update, run_thread_reply_enrichment_pipeline
 
 
@@ -266,14 +266,28 @@ def process_thread_reply_enrichment_job(
 
 
 def parse_worker_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="RQ worker for JD pipeline")
+    parser = argparse.ArgumentParser(description="RQ worker for JD and reply-enrichment queues")
     parser.add_argument("--burst", action="store_true", help="Exit after current queue is drained")
     parser.add_argument(
         "--with-scheduler",
         action="store_true",
         help="Enable RQ scheduler. Disabled by default to reduce Redis command volume.",
     )
+    parser.add_argument(
+        "--queue-type",
+        choices=["jd", "reply", "all"],
+        default=os.getenv("RQ_WORKER_QUEUE_TYPE", "jd"),
+        help="Queue set to consume: jd, reply, or all (default: jd).",
+    )
     return parser.parse_args()
+
+
+def get_worker_queue_names(queue_type: str) -> List[str]:
+    if queue_type == "jd":
+        return [get_jd_queue_name()]
+    if queue_type == "reply":
+        return [get_reply_queue_name()]
+    return [get_jd_queue_name(), get_reply_queue_name()]
 
 
 def main() -> None:
@@ -281,8 +295,8 @@ def main() -> None:
     args = parse_worker_args()
 
     conn = get_redis_connection()
-    queue_name = get_queue_name()
-    worker = Worker([queue_name], connection=conn)
+    queue_names = get_worker_queue_names(args.queue_type)
+    worker = Worker(queue_names, connection=conn)
     with_scheduler = args.with_scheduler or _is_truthy(os.getenv("RQ_WITH_SCHEDULER"), default=False)
     worker.work(with_scheduler=with_scheduler, burst=args.burst)
 

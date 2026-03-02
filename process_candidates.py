@@ -35,6 +35,9 @@ STAGES = ["fetch_jd", "generate_queries", "exa_search", "csv", "dedup", "score",
 
 # Conservative concurrency limits (well under API rate caps).
 DEFAULT_EXA_CONCURRENT_SEARCHES = 5   # Exa limit: 10 QPS
+DEFAULT_EXA_SEARCH_MAX_ATTEMPTS = 4
+DEFAULT_EXA_RETRY_BASE_DELAY_SECONDS = 2.0
+MAX_EXA_RETRY_DELAY_SECONDS = 20.0
 DEFAULT_SCORING_CONCURRENT_CALLS = 24
 DEFAULT_SCORING_INFLIGHT_FACTOR = 2
 
@@ -132,6 +135,46 @@ def _read_positive_int_env(name: str, default: int) -> int:
         print(f"[warn] invalid {name}={raw!r}; using default {default}")
         return default
     return value
+
+
+def _safe_env_int(name: str, default: int) -> int:
+    return _read_positive_int_env(name, default)
+
+
+def _safe_env_float(name: str, default: float) -> float:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        print(f"[warn] invalid {name}={raw!r}; using default {default}")
+        return default
+    if value <= 0:
+        print(f"[warn] invalid {name}={raw!r}; using default {default}")
+        return default
+    return value
+
+
+def _is_retryable_exa_error(exc: Exception) -> bool:
+    message = normalize_whitespace(str(exc)).lower()
+    retryable_markers = (
+        "status code 408",
+        "status code 409",
+        "status code 425",
+        "status code 429",
+        "status code 500",
+        "status code 502",
+        "status code 503",
+        "status code 504",
+        "internal_error",
+        "timed out",
+        "timeout",
+        "temporarily unavailable",
+        "connection reset",
+        "connection aborted",
+    )
+    return any(marker in message for marker in retryable_markers)
 
 
 def get_exa_concurrent_searches() -> int:
@@ -398,23 +441,48 @@ def to_plain_object(value: Any) -> Any:
 
 
 def exa_search_one(exa: Any, query: str, num_results: int = 100) -> Dict[str, Any]:
-    result = exa.search(
-        query,
-        category="people",
-        num_results=num_results,
-        type="auto",
-        contents={
-            "text": {
-                "verbosity": "full",
-            }
-        },
+    max_attempts = max(1, _safe_env_int("EXA_SEARCH_MAX_ATTEMPTS", DEFAULT_EXA_SEARCH_MAX_ATTEMPTS))
+    retry_base_delay = max(
+        0.1,
+        _safe_env_float("EXA_RETRY_BASE_DELAY_SECONDS", DEFAULT_EXA_RETRY_BASE_DELAY_SECONDS),
     )
+    last_error: Optional[Exception] = None
 
-    result = to_plain_object(result)
-    if isinstance(result, dict):
-        return result
+    for attempt in range(1, max_attempts + 1):
+        try:
+            result = exa.search(
+                query,
+                category="people",
+                num_results=num_results,
+                type="auto",
+                contents={
+                    "text": {
+                        "verbosity": "full",
+                    }
+                },
+            )
 
-    raise RuntimeError("Unexpected Exa response type; could not convert to dict.")
+            result = to_plain_object(result)
+            if isinstance(result, dict):
+                return result
+
+            raise RuntimeError("Unexpected Exa response type; could not convert to dict.")
+        except Exception as exc:
+            last_error = exc
+            if attempt >= max_attempts or not _is_retryable_exa_error(exc):
+                raise
+
+            delay_seconds = min(
+                retry_base_delay * (2 ** (attempt - 1)),
+                MAX_EXA_RETRY_DELAY_SECONDS,
+            )
+            print(
+                f"[warn] Exa search attempt {attempt}/{max_attempts} failed for query "
+                f"{query!r}: {exc}. Retrying in {delay_seconds:.1f}s."
+            )
+            time.sleep(delay_seconds)
+
+    raise RuntimeError(f"Exa search failed unexpectedly: {last_error}")
 
 
 def run_exa_fanout(
@@ -430,33 +498,49 @@ def run_exa_fanout(
     exa = Exa(exa_api_key)
     all_items: List[Dict[str, Any]] = []
     query_summaries: List[Dict[str, Any]] = [None] * len(queries)  # preserve order
+    failed_queries: List[Dict[str, Any]] = []
     lock = threading.Lock()
 
     def _search_one(idx: int, query: str) -> None:
-        result = exa_search_one(
-            exa=exa,
-            query=query,
-            num_results=num_results_per_query,
-        )
-        raw_items = result.get("results", [])
-        items: List[Dict[str, Any]] = []
-        for raw_item in raw_items if isinstance(raw_items, list) else []:
-            item = to_plain_object(raw_item)
-            if isinstance(item, dict):
-                items.append(item)
+        try:
+            result = exa_search_one(
+                exa=exa,
+                query=query,
+                num_results=num_results_per_query,
+            )
+            raw_items = result.get("results", [])
+            items: List[Dict[str, Any]] = []
+            for raw_item in raw_items if isinstance(raw_items, list) else []:
+                item = to_plain_object(raw_item)
+                if isinstance(item, dict):
+                    items.append(item)
 
-        for item in items:
-            item["_source_query_index"] = idx
-            item["_source_query"] = query
+            for item in items:
+                item["_source_query_index"] = idx
+                item["_source_query"] = query
 
-        with lock:
-            all_items.extend(items)
-            query_summaries[idx - 1] = {
-                "query_index": idx,
-                "query": query,
-                "result_count": len(items),
-            }
-        print(f"Exa query {idx}/{len(queries)}: received {len(items)} results")
+            with lock:
+                all_items.extend(items)
+                query_summaries[idx - 1] = {
+                    "query_index": idx,
+                    "query": query,
+                    "result_count": len(items),
+                    "status": "ok",
+                }
+            print(f"Exa query {idx}/{len(queries)}: received {len(items)} results")
+        except Exception as exc:
+            error_msg = normalize_whitespace(str(exc))
+            with lock:
+                failure = {
+                    "query_index": idx,
+                    "query": query,
+                    "result_count": 0,
+                    "status": "failed",
+                    "error": error_msg,
+                }
+                failed_queries.append(failure)
+                query_summaries[idx - 1] = failure
+            print(f"[warn] Exa query {idx}/{len(queries)} failed: {error_msg}")
 
     exa_workers = get_exa_concurrent_searches()
     with ThreadPoolExecutor(max_workers=exa_workers) as executor:
@@ -467,9 +551,14 @@ def run_exa_fanout(
         for future in as_completed(futures):
             future.result()  # Raise any exceptions
 
+    if failed_queries and len(failed_queries) == len(queries):
+        first_error = failed_queries[0].get("error") or "unknown Exa error"
+        raise RuntimeError(f"All Exa queries failed after retries. First error: {first_error}")
+
     return {
         "fetched_at": datetime.utcnow().isoformat() + "Z",
         "query_summaries": query_summaries,
+        "failed_queries": failed_queries,
         "total_results": len(all_items),
         "results": all_items,
     }

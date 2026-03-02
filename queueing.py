@@ -6,7 +6,8 @@ from redis.exceptions import RedisError, ResponseError
 from rq import Queue
 
 
-DEFAULT_QUEUE_NAME = "jd-pipeline"
+DEFAULT_JD_QUEUE_NAME = "jd-pipeline"
+DEFAULT_REPLY_QUEUE_NAME = "reply-enrichment"
 DEFAULT_EVENT_TTL_SECONDS = 60 * 60 * 24
 UPSTASH_LIMIT_ERROR_SNIPPET = "max requests limit exceeded"
 
@@ -29,14 +30,23 @@ def get_redis_connection() -> Redis:
     return Redis.from_url(redis_url)
 
 
+def get_jd_queue_name() -> str:
+    return os.getenv("RQ_JD_QUEUE_NAME") or os.getenv("RQ_QUEUE_NAME") or DEFAULT_JD_QUEUE_NAME
+
+
+def get_reply_queue_name() -> str:
+    return os.getenv("RQ_REPLY_QUEUE_NAME", DEFAULT_REPLY_QUEUE_NAME)
+
+
 def get_queue_name() -> str:
-    return os.getenv("RQ_QUEUE_NAME", DEFAULT_QUEUE_NAME)
+    # Backward-compatible alias for older callers that only know about one queue.
+    return get_jd_queue_name()
 
 
-def get_queue() -> Queue:
+def get_queue(queue_name: Optional[str] = None) -> Queue:
     timeout = int(os.getenv("RQ_JOB_TIMEOUT", "7200"))
     return Queue(
-        get_queue_name(),
+        queue_name or get_queue_name(),
         connection=get_redis_connection(),
         default_timeout=timeout,
     )
@@ -91,7 +101,7 @@ def clear_event_seen(event_id: str) -> None:
 
 def enqueue_jd_pipeline_job(payload: Dict[str, Any]):
     try:
-        queue = get_queue()
+        queue = get_queue(get_jd_queue_name())
         return queue.enqueue(
             "worker.process_jd_pipeline_job",
             kwargs=payload,
@@ -111,7 +121,7 @@ def enqueue_jd_pipeline_job(payload: Dict[str, Any]):
 
 def enqueue_thread_reply_enrichment_job(payload: Dict[str, Any]):
     try:
-        queue = get_queue()
+        queue = get_queue(get_reply_queue_name())
         return queue.enqueue(
             "worker.process_thread_reply_enrichment_job",
             kwargs=payload,
