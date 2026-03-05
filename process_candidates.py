@@ -454,7 +454,7 @@ def exa_search_one(exa: Any, query: str, num_results: int = 100) -> Dict[str, An
                 query,
                 category="people",
                 num_results=num_results,
-                type="auto",
+                type="deep",
                 contents={
                     "text": {
                         "verbosity": "full",
