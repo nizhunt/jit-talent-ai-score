@@ -630,6 +630,7 @@ def _add_lead_to_instantly_campaign(
     payload = {
         "email": lead["email"],
         "campaign": campaign_id,
+        "skip_if_in_workspace": True,
         "first_name": lead.get("first_name", ""),
         "last_name": lead.get("last_name", ""),
         "company_name": _clean_company_name(lead.get("company_name", "")),
