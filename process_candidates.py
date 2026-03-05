@@ -486,7 +486,7 @@ def exa_search_one(
                 query,
                 category="people",
                 num_results=num_results,
-                type="deep",
+                type="deep-reasoning",
                 contents={
                     "text": {
                         "verbosity": "full",
