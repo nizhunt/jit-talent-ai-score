@@ -34,7 +34,8 @@ SLACK_COMPLETE_UPLOAD_EXTERNAL = "https://slack.com/api/files.completeUploadExte
 STAGES = ["fetch_jd", "generate_queries", "exa_search", "csv", "dedup", "score", "post"]
 
 # Conservative concurrency limits (well under API rate caps).
-DEFAULT_EXA_CONCURRENT_SEARCHES = 5   # Exa limit: 10 QPS
+DEFAULT_EXA_CONCURRENT_SEARCHES = 7
+DEFAULT_EXA_MAX_QPS = 8.0
 DEFAULT_EXA_SEARCH_MAX_ATTEMPTS = 4
 DEFAULT_EXA_RETRY_BASE_DELAY_SECONDS = 2.0
 MAX_EXA_RETRY_DELAY_SECONDS = 20.0
@@ -156,6 +157,26 @@ def _safe_env_float(name: str, default: float) -> float:
     return value
 
 
+class ExaRateLimiter:
+    def __init__(self, max_qps: float):
+        self.max_qps = max_qps
+        self._interval_seconds = 1.0 / max_qps
+        self._lock = threading.Lock()
+        self._next_allowed_at = 0.0
+
+    def wait_for_slot(self) -> None:
+        sleep_seconds = 0.0
+        with self._lock:
+            now = time.monotonic()
+            if now < self._next_allowed_at:
+                sleep_seconds = self._next_allowed_at - now
+                self._next_allowed_at += self._interval_seconds
+            else:
+                self._next_allowed_at = now + self._interval_seconds
+        if sleep_seconds > 0:
+            time.sleep(sleep_seconds)
+
+
 def _is_retryable_exa_error(exc: Exception) -> bool:
     message = normalize_whitespace(str(exc)).lower()
     retryable_markers = (
@@ -179,6 +200,10 @@ def _is_retryable_exa_error(exc: Exception) -> bool:
 
 def get_exa_concurrent_searches() -> int:
     return _read_positive_int_env("EXA_CONCURRENT_SEARCHES", DEFAULT_EXA_CONCURRENT_SEARCHES)
+
+
+def get_exa_max_qps() -> float:
+    return _safe_env_float("EXA_MAX_QPS", DEFAULT_EXA_MAX_QPS)
 
 
 def get_scoring_concurrent_calls() -> int:
@@ -440,7 +465,12 @@ def to_plain_object(value: Any) -> Any:
     return value
 
 
-def exa_search_one(exa: Any, query: str, num_results: int = 100) -> Dict[str, Any]:
+def exa_search_one(
+    exa: Any,
+    query: str,
+    num_results: int = 100,
+    rate_limiter: Optional[ExaRateLimiter] = None,
+) -> Dict[str, Any]:
     max_attempts = max(1, _safe_env_int("EXA_SEARCH_MAX_ATTEMPTS", DEFAULT_EXA_SEARCH_MAX_ATTEMPTS))
     retry_base_delay = max(
         0.1,
@@ -450,6 +480,8 @@ def exa_search_one(exa: Any, query: str, num_results: int = 100) -> Dict[str, An
 
     for attempt in range(1, max_attempts + 1):
         try:
+            if rate_limiter is not None:
+                rate_limiter.wait_for_slot()
             result = exa.search(
                 query,
                 category="people",
@@ -500,6 +532,7 @@ def run_exa_fanout(
     query_summaries: List[Dict[str, Any]] = [None] * len(queries)  # preserve order
     failed_queries: List[Dict[str, Any]] = []
     lock = threading.Lock()
+    exa_rate_limiter = ExaRateLimiter(get_exa_max_qps())
 
     def _search_one(idx: int, query: str) -> None:
         try:
@@ -507,6 +540,7 @@ def run_exa_fanout(
                 exa=exa,
                 query=query,
                 num_results=num_results_per_query,
+                rate_limiter=exa_rate_limiter,
             )
             raw_items = result.get("results", [])
             items: List[Dict[str, Any]] = []
