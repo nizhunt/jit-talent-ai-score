@@ -30,16 +30,11 @@ RESULT_MESSAGE_PREFIX_DEFAULT = "AI-scored candidates CSV for this JD"
 def parse_threshold_from_text(text: str) -> Optional[float]:
     if not text:
         return None
-    match = re.search(r"(?<![\d.])(-?\d+(?:\.\d+)?)", text)
+    # Accept only a bare integer threshold (1-10), optionally surrounded by whitespace.
+    match = re.fullmatch(r"\s*(10|[1-9])\s*", text)
     if not match:
         return None
-    try:
-        threshold = float(match.group(1))
-    except ValueError:
-        return None
-    if threshold < 0 or threshold > 10:
-        return None
-    return threshold
+    return float(match.group(1))
 
 
 def _require_env(name: str) -> str:

@@ -3,7 +3,7 @@
 Slack `# JD` ingestion + Exa sourcing + AI scoring pipeline.
 
 Additional isolated workflow:
-- thread reply to a scored CSV message with a numeric threshold (for example `5`)
+- thread reply to a scored CSV message with an exact integer threshold `1` to `10` and no other text (for example `5`)
 - filters `AI Score >= threshold`
 - enriches emails via SaleSQL (only emails where `type=Direct` and valid: `is_valid=true` or fallback `status=Valid`)
 - verifies via Reoon then BounceBan
