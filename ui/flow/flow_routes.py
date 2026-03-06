@@ -152,10 +152,10 @@ def _default_flow_definition() -> Dict[str, Any]:
             {
                 "id": "exa_search",
                 "type": "action",
-                "label": "Run Exa Fanout Search (per batch, 5 concurrent)",
+                "label": "Run Exa Fanout Search (per batch, 7 concurrent)",
                 "description": (
                     "Inside the batch loop: fetches up to 100 candidate profiles "
-                    "per query from Exa using 5 concurrent threads. Each batch searches 10 queries "
+                    "per query from Exa using 7 concurrent threads. Each batch searches 10 queries "
                     "(up to 1000 results per batch)."
                 ),
                 "status": "current",

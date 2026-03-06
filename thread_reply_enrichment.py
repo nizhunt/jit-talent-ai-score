@@ -271,9 +271,15 @@ def _is_result_message_thread_root(message: Dict[str, Any], csv_file: Dict[str, 
     filename_hint = "sheet-ready" in name or "sheet-ready" in title or "scored" in name or "scored" in title
 
     has_prefix = bool(prefix and prefix in text)
+    has_new_summary_markers = (
+        "scored:" in text
+        and "finds (score >= 5)" in text
+        and "score tally:" in text
+        and "linkedin samples by score:" in text
+    )
     if strict:
-        return has_prefix
-    return has_prefix or filename_hint
+        return has_prefix or (filename_hint and has_new_summary_markers)
+    return has_prefix or filename_hint or has_new_summary_markers
 
 
 def _download_slack_file(slack_token: str, url: str, destination: Path) -> None:

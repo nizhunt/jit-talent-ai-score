@@ -10,7 +10,7 @@ import time
 from collections import deque
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, as_completed, wait
 from datetime import datetime
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 from urllib.parse import urlsplit
 
 import pandas as pd
@@ -35,7 +35,7 @@ STAGES = ["fetch_jd", "generate_queries", "exa_search", "csv", "dedup", "score",
 
 # Conservative concurrency limits (well under API rate caps).
 DEFAULT_EXA_CONCURRENT_SEARCHES = 7
-DEFAULT_EXA_MAX_QPS = 8.0
+DEFAULT_EXA_MAX_QPS = 2.0
 DEFAULT_EXA_SEARCH_MAX_ATTEMPTS = 4
 DEFAULT_EXA_RETRY_BASE_DELAY_SECONDS = 2.0
 MAX_EXA_RETRY_DELAY_SECONDS = 20.0
@@ -188,6 +188,8 @@ def _is_retryable_exa_error(exc: Exception) -> bool:
         "status code 502",
         "status code 503",
         "status code 504",
+        "rate limit",
+        "requests per second",
         "internal_error",
         "timed out",
         "timeout",
@@ -1337,6 +1339,57 @@ def build_score_tally_lines(scored_df: pd.DataFrame) -> List[str]:
     return [f"  Score {int(score_val)}: {int(count)}" for score_val, count in tally.items()]
 
 
+def build_linkedin_samples_by_score_lines(scored_df: pd.DataFrame, per_score_limit: int = 2) -> List[str]:
+    if "ai-score" not in scored_df.columns or per_score_limit <= 0:
+        return []
+
+    linkedin_col = next(
+        (col for col in ["linkedin", "LinkedIn", "linkedin_url", "LinkedIn URL"] if col in scored_df.columns),
+        "",
+    )
+    if not linkedin_col:
+        return []
+
+    numeric_scores = pd.to_numeric(scored_df["ai-score"], errors="coerce")
+    if numeric_scores.dropna().empty:
+        return []
+
+    score_targets = [9, 8, 7, 6, 5, 0]
+    seen_linkedin: Set[str] = set()
+    lines: List[str] = ["LinkedIn samples by score:"]
+
+    for score_target in score_targets:
+        lines.append(f"  Score {score_target}:")
+        selected_links: List[str] = []
+
+        matching_rows = scored_df.loc[numeric_scores == float(score_target), linkedin_col]
+        for raw_link in matching_rows:
+            link = normalize_whitespace(raw_link)
+            if "linkedin.com" not in link.lower():
+                continue
+
+            parsed = urlsplit(link)
+            if not parsed.scheme:
+                link = f"https://{link.lstrip('/')}"
+
+            dedup_key = normalize_url(link)
+            if not dedup_key or dedup_key in seen_linkedin:
+                continue
+
+            seen_linkedin.add(dedup_key)
+            selected_links.append(link)
+            if len(selected_links) >= per_score_limit:
+                break
+
+        for idx, link in enumerate(selected_links, start=1):
+            lines.append(f"    {idx}. {link}")
+
+        if not selected_links:
+            lines.append("    (none found)")
+
+    return lines
+
+
 def count_qualified_finds(scored_df: pd.DataFrame, minimum_score: float = 5.0) -> int:
     if "ai-score" not in scored_df.columns:
         return 0
@@ -1578,6 +1631,7 @@ def run_pipeline_from_jd_text(
 
     # Build score tally before freeing the DataFrame.
     score_tally_lines = build_score_tally_lines(scored_df)
+    linkedin_sample_lines = build_linkedin_samples_by_score_lines(scored_df, per_score_limit=2)
 
     del scored_df  # Free before Slack upload
     gc.collect()
@@ -1590,14 +1644,13 @@ def run_pipeline_from_jd_text(
     else:
         cost_per_find_line = "Est. cost/find (score >= 5): N/A (no candidates scored 5+)\n"
     upload_comment = (
-        f"AI-scored candidates CSV for this JD\n"
         f"{jd_name_line}"
         f"Scored: {rows_scored}\n"
         f"Finds (score >= 5): {qualified_finds}\n"
-        f"After dedup: {rows_after_dedup} (from {rows_before_dedup} fetched)\n"
         f"{cost_per_find_line}"
         f"Total time: {format_eta_seconds(elapsed)}\n\n"
-        f"Score Tally:\n{tally_block}"
+        f"Score Tally:\n{tally_block}\n\n"
+        f"{'\n'.join(linkedin_sample_lines) if linkedin_sample_lines else 'LinkedIn samples by score: unavailable'}"
     )
     slack_upload = upload_csv_to_slack(
         slack_token=slack_token,
