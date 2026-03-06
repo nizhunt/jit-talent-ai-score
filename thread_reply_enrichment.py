@@ -462,9 +462,12 @@ def _submit_reoon_task(reoon_api_key: str, emails: List[str]) -> int:
 
 
 def _poll_reoon_task(reoon_api_key: str, task_id: int) -> Dict[str, Any]:
-    max_wait_seconds = int(os.getenv("REOON_MAX_WAIT_SECONDS", "600"))
+    max_wait_seconds = int(os.getenv("REOON_MAX_WAIT_SECONDS", "1800"))
     poll_interval_seconds = int(os.getenv("REOON_POLL_INTERVAL_SECONDS", "15"))
     deadline = time.monotonic() + max_wait_seconds
+    last_status = "unknown"
+    last_checked: Optional[int] = None
+    last_total: Optional[int] = None
 
     while True:
         response = requests.get(
@@ -475,12 +478,23 @@ def _poll_reoon_task(reoon_api_key: str, task_id: int) -> Dict[str, Any]:
         response.raise_for_status()
         body = response.json()
         status = (body.get("status") or "").lower()
+        if status:
+            last_status = status
+        count_checked = body.get("count_checked")
+        count_total = body.get("count_total")
+        if isinstance(count_checked, int):
+            last_checked = count_checked
+        if isinstance(count_total, int):
+            last_total = count_total
         if status == "completed":
             return body
         if status not in {"waiting", "running", "queued", "processing"}:
             raise RuntimeError(f"Unexpected Reoon status: {body}")
         if time.monotonic() >= deadline:
-            raise RuntimeError(f"Timed out waiting for Reoon task {task_id}.")
+            raise RuntimeError(
+                f"Timed out waiting for Reoon task {task_id} after {max_wait_seconds}s "
+                f"(last_status={last_status}, checked={last_checked}, total={last_total})."
+            )
         time.sleep(max(1, poll_interval_seconds))
 
 
@@ -743,7 +757,31 @@ def run_thread_reply_enrichment_pipeline(
 
         _update(f"SaleSQL found {len(all_emails)} emails. Sending to Reoon...")
         reoon_task_id = _submit_reoon_task(reoon_api_key=reoon_api_key, emails=all_emails)
-        reoon_result = _poll_reoon_task(reoon_api_key=reoon_api_key, task_id=reoon_task_id)
+        try:
+            reoon_result = _poll_reoon_task(reoon_api_key=reoon_api_key, task_id=reoon_task_id)
+        except RuntimeError as exc:
+            message = str(exc)
+            if "Timed out waiting for Reoon task" not in message:
+                raise
+            _update(
+                f"Reoon task `{reoon_task_id}` did not finish in time. "
+                "Stopping this run without campaign creation."
+            )
+            return {
+                "threshold": threshold,
+                "csv_filename": csv_file.get("name") or "scored.csv",
+                "jd_name": jd_name,
+                "rows_with_score_and_linkedin": len(all_candidates),
+                "rows_meeting_threshold": len(threshold_candidates),
+                "salesql_emails_found": len(all_emails),
+                "reoon_passed": 0,
+                "bounceban_deliverable": 0,
+                "campaign_id": None,
+                "campaign_name": None,
+                "leads_added": 0,
+                "lead_errors": [],
+                "note": message,
+            }
         reoon_passed = _dedupe_preserve_order(_filter_reoon_results(reoon_result=reoon_result, input_emails=all_emails))
 
         if not reoon_passed:

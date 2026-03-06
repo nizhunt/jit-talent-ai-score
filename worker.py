@@ -257,6 +257,9 @@ def process_thread_reply_enrichment_job(
             f"Reoon passed: {result.get('reoon_passed')}\n"
             f"BounceBan deliverable: {result.get('bounceban_deliverable')}"
         )
+        note = (result.get("note") or "").strip()
+        if note:
+            summary_text = f"{summary_text}\nNote: {note}"
     post_thread_reply_update(
         slack_token=slack_token,
         channel_id=channel_id,
