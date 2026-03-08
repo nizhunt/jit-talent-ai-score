@@ -261,8 +261,38 @@ def _extract_jd_name_from_message(message: Dict[str, Any]) -> str:
     return (match.group(1) or "").strip()
 
 
+def _collect_text_values(value: Any, out: List[str]) -> None:
+    if isinstance(value, str):
+        text = value.strip()
+        if text:
+            out.append(text)
+        return
+    if isinstance(value, dict):
+        for key, nested in value.items():
+            # Slack block payloads often keep useful text in `text`/`fallback` fields.
+            if key in {"text", "fallback", "pretext", "title", "comment"}:
+                _collect_text_values(nested, out)
+        return
+    if isinstance(value, list):
+        for nested in value:
+            _collect_text_values(nested, out)
+
+
+def _extract_thread_root_text_for_validation(message: Dict[str, Any]) -> str:
+    parts: List[str] = []
+    _collect_text_values(message.get("text"), parts)
+    _collect_text_values(message.get("blocks"), parts)
+    _collect_text_values(message.get("attachments"), parts)
+
+    # File-share roots may keep the initial comment under the file payload.
+    for item in message.get("files") or []:
+        _collect_text_values(item.get("initial_comment"), parts)
+
+    return "\n".join(parts).strip().lower()
+
+
 def _is_result_message_thread_root(message: Dict[str, Any], csv_file: Dict[str, Any]) -> bool:
-    text = (message.get("text") or "").strip().lower()
+    text = _extract_thread_root_text_for_validation(message)
     prefix = os.getenv("RESULT_MESSAGE_PREFIX", RESULT_MESSAGE_PREFIX_DEFAULT).strip().lower()
     strict = _is_truthy(os.getenv("THREAD_RESULT_STRICT"), default=True)
 
@@ -278,7 +308,7 @@ def _is_result_message_thread_root(message: Dict[str, Any], csv_file: Dict[str, 
         and "linkedin samples by score:" in text
     )
     if strict:
-        return has_prefix or (filename_hint and has_new_summary_markers)
+        return has_prefix or has_new_summary_markers or filename_hint
     return has_prefix or filename_hint or has_new_summary_markers
 
 
