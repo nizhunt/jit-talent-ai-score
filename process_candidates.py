@@ -1339,7 +1339,7 @@ def build_score_tally_lines(scored_df: pd.DataFrame) -> List[str]:
     return [f"  Score {int(score_val)}: {int(count)}" for score_val, count in tally.items()]
 
 
-def build_linkedin_samples_by_score_lines(scored_df: pd.DataFrame, per_score_limit: int = 2) -> List[str]:
+def build_linkedin_samples_by_score_lines(scored_df: pd.DataFrame, per_score_limit: int = 10) -> List[str]:
     if "ai-score" not in scored_df.columns or per_score_limit <= 0:
         return []
 
@@ -1631,7 +1631,7 @@ def run_pipeline_from_jd_text(
 
     # Build score tally before freeing the DataFrame.
     score_tally_lines = build_score_tally_lines(scored_df)
-    linkedin_sample_lines = build_linkedin_samples_by_score_lines(scored_df, per_score_limit=2)
+    linkedin_sample_lines = build_linkedin_samples_by_score_lines(scored_df, per_score_limit=10)
 
     del scored_df  # Free before Slack upload
     gc.collect()
