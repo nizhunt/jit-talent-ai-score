@@ -1,6 +1,7 @@
 import csv
 import os
 import re
+import sys
 import tempfile
 import time
 from datetime import date, timedelta
@@ -25,6 +26,7 @@ INSTANTLY_CAMPAIGN_CREATE_URL = "https://api.instantly.ai/api/v2/campaigns"
 INSTANTLY_LEAD_CREATE_URL = "https://api.instantly.ai/api/v2/leads"
 
 RESULT_MESSAGE_PREFIX_DEFAULT = "AI-scored candidates CSV for this JD"
+_CSV_FIELD_LIMIT_CONFIGURED = False
 
 
 def parse_threshold_from_text(text: str) -> Optional[float]:
@@ -35,6 +37,21 @@ def parse_threshold_from_text(text: str) -> Optional[float]:
     if not match:
         return None
     return float(match.group(1))
+
+
+def _ensure_large_csv_field_limit() -> None:
+    global _CSV_FIELD_LIMIT_CONFIGURED
+    if _CSV_FIELD_LIMIT_CONFIGURED:
+        return
+
+    max_limit = sys.maxsize
+    while max_limit > 0:
+        try:
+            csv.field_size_limit(max_limit)
+            _CSV_FIELD_LIMIT_CONFIGURED = True
+            return
+        except OverflowError:
+            max_limit //= 10
 
 
 def _require_env(name: str) -> str:
@@ -347,6 +364,7 @@ def _download_slack_file(slack_token: str, url: str, destination: Path) -> None:
 
 
 def _load_candidates_from_csv(csv_path: Path) -> List[Dict[str, Any]]:
+    _ensure_large_csv_field_limit()
     candidates: List[Dict[str, Any]] = []
     with csv_path.open("r", encoding="utf-8-sig", newline="") as f:
         reader = csv.DictReader(f)
