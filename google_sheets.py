@@ -194,7 +194,6 @@ def _ensure_domain_permission(drive: Any, file_id: str, domain: str, role: str) 
                 fileId=file_id,
                 body=permission,
                 supportsAllDrives=True,
-                sendNotificationEmail=False,
                 fields="id",
             )
             .execute()
