@@ -9,6 +9,7 @@ from dotenv import load_dotenv
 from openai import OpenAI
 from rq import Worker
 
+from dashboard_logger import log_enrichment_dashboard_row, log_jd_processing_dashboard_row
 from process_candidates import parse_args, post_slack_message, run_pipeline_from_jd_text
 from queueing import clear_event_seen, get_jd_queue_name, get_redis_connection, get_reply_queue_name
 from thread_reply_enrichment import post_thread_reply_update, run_thread_reply_enrichment_pipeline
@@ -168,6 +169,16 @@ def process_jd_pipeline_job(
             exa_api_key=exa_api_key,
             slack_token=slack_token,
         )
+        try:
+            log_jd_processing_dashboard_row(
+                jd_name=jd_name or "",
+                candidate_sheet_url=str(result.get("google_sheet_url") or ""),
+                total_profiles_found=int(result.get("rows_before_dedup") or 0),
+                profiles_after_dedup=int(result.get("rows_after_dedup") or 0),
+                score_counts_by_score=result.get("score_counts_by_score") or {},
+            )
+        except Exception as exc:
+            print(f"[warn] dashboard JD logging failed: {exc}")
         return {"ok": True, "event_id": event_id, "jd_name": jd_name, "result": result}
     except Exception as exc:
         _notify_failure(channel_id=channel_id, error_msg=str(exc), event_id=event_id, jd_name=jd_name)
@@ -224,6 +235,23 @@ def process_thread_reply_enrichment_job(
             ),
         )
         return {"ok": True, "event_id": event_id, "result": result}
+
+    try:
+        log_enrichment_dashboard_row(
+            jd_name=str(result.get("jd_name") or ""),
+            candidate_sheet_url=str(result.get("source_url") or ""),
+            minimum_score_for_contact=threshold,
+            candidates_entered_enrichment=int(result.get("rows_meeting_threshold") or 0),
+            emails_found_salesql=int(result.get("salesql_emails_found") or 0),
+            emails_passed_reoon=int(result.get("reoon_passed") or 0),
+            emails_passed_bounceban=int(result.get("bounceban_deliverable") or 0),
+            net_leads_enrolled_instantly=int(result.get("leads_added") or 0),
+            instantly_campaign_name=str(result.get("campaign_name") or ""),
+            instantly_campaign_id=str(result.get("campaign_id") or ""),
+            notes=str(result.get("note") or ""),
+        )
+    except Exception as exc:
+        print(f"[warn] dashboard enrichment logging failed: {exc}")
 
     lead_errors = result.get("lead_errors") or []
     campaign_id = result.get("campaign_id")

@@ -1275,6 +1275,23 @@ def build_score_tally_lines(scored_df: pd.DataFrame) -> List[str]:
     return [f"  Score {int(score_val)}: {int(count)}" for score_val, count in tally.items()]
 
 
+def build_score_counts_by_score(scored_df: pd.DataFrame) -> Dict[int, int]:
+    counts = {score: 0 for score in range(0, 11)}
+    if "ai-score" not in scored_df.columns:
+        return counts
+
+    numeric_scores = pd.to_numeric(scored_df["ai-score"], errors="coerce").dropna()
+    if numeric_scores.empty:
+        return counts
+
+    tally = numeric_scores.astype(int).value_counts()
+    for raw_score, raw_count in tally.items():
+        score = int(raw_score)
+        if 0 <= score <= 10:
+            counts[score] = int(raw_count)
+    return counts
+
+
 def build_linkedin_samples_by_score_lines(scored_df: pd.DataFrame, per_score_limit: int = 10) -> List[str]:
     if "ai-score" not in scored_df.columns or per_score_limit <= 0:
         return []
@@ -1585,6 +1602,7 @@ def run_pipeline_from_jd_text(
 
     # Build score tally before freeing the DataFrame.
     score_tally_lines = build_score_tally_lines(scored_df)
+    score_counts_by_score = build_score_counts_by_score(scored_df)
     linkedin_sample_lines = build_linkedin_samples_by_score_lines(scored_df, per_score_limit=10)
 
     del scored_df  # Free before Slack upload
@@ -1641,6 +1659,7 @@ def run_pipeline_from_jd_text(
         "sheet_ready_csv": sheet_ready_csv,
         "queries_log_path": None,
         "cost_summary": cost_summary,
+        "score_counts_by_score": score_counts_by_score,
     }
 
 

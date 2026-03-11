@@ -89,6 +89,29 @@ Optional:
 - `RESULT_MESSAGE_PREFIX` (default `AI-scored candidates sheet for this JD`)
 - `GOOGLE_WORKSPACE_DOMAIN_ROLE` (default `writer`; set `reader` or `commenter` if needed)
 - `THREAD_ENRICHMENT_VERBOSE_UPDATES` (default `false`; if true, posts intermediate stage updates in thread)
+- `DASHBOARD_GOOGLE_SHEET_URL` (optional; if set, upserts JD + enrichment metrics into this dashboard sheet)
+- `DASHBOARD_WORKSHEET_NAME` (optional; tab name inside `DASHBOARD_GOOGLE_SHEET_URL`; default is first tab)
+
+## Dashboard Logging (Optional)
+
+Set `DASHBOARD_GOOGLE_SHEET_URL` to enable automatic dashboard rows keyed by `Scored Candidates Sheet URL`.
+
+Column names used:
+- `JD Campaign Name`
+- `Scored Candidates Sheet URL`
+- `Total Profiles Found`
+- `Profiles After Deduplication`
+- `Location Mismatch (Manual Review)`
+- `Score 10 Count` ... `Score 0 Count`
+- `Minimum Score for Contact`
+- `Candidates Entered Enrichment`
+- `Emails Found via SaleSQL`
+- `Emails Passed Reoon`
+- `Emails Passed BounceBan`
+- `Net Leads Enrolled to Instantly`
+- `Instantly Campaign Name`
+- `Instantly Campaign URL`
+- `Notes`
 
 ## Slack App Setup
 
