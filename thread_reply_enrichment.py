@@ -665,18 +665,21 @@ def _create_instantly_campaign(instantly_api_key: str, threshold: float, jd_name
                 "steps": [
                     {
                         "type": "email",
-                        "delay": 0,
+                        "delay": 2,
+                        "delay_unit": "days",
                         "variants": [{"subject": INSTANTLY_STEP_ONE_SUBJECT, "body": INSTANTLY_STEP_ONE_BODY}],
                     },
                     {
                         "type": "email",
                         "delay": 2,
-                        "variants": [{"subject": "", "body": INSTANTLY_STEP_TWO_BODY}],
+                        "delay_unit": "days",
+                        "variants": [{"subject": INSTANTLY_STEP_ONE_SUBJECT, "body": INSTANTLY_STEP_TWO_BODY}],
                     },
                     {
                         "type": "email",
-                        "delay": 2,
-                        "variants": [{"subject": "", "body": INSTANTLY_STEP_THREE_BODY}],
+                        "delay": 0,
+                        "delay_unit": "days",
+                        "variants": [{"subject": INSTANTLY_STEP_ONE_SUBJECT, "body": INSTANTLY_STEP_THREE_BODY}],
                     }
                 ]
             }
