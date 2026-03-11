@@ -29,7 +29,7 @@ If they pass the disqualifiers, score based on fit. **Do NOT disqualify for miss
     
 - **Hands-on recency**: For IC/hands-on roles, if candidate hasn't done hands-on work in 5+ years, heavily penalize  
     
-- **Over-qualification**: If candidate has more years of experience than the required range (e.g., 15+ years leadership experience for a jd that requires 2-5 years), reduce score by 4 points  
+- **Over-qualification**: If candidate has more years of experience than the required range (e.g., 15+ years leadership experience for a jd that requires 2-5 years), reduce score by 5 points  
     
 - **Job tenure patterns**:  
     
@@ -96,33 +96,13 @@ Provide three fields: **Score**, **Reasoning**, and **Email**.
 
 **Email:**
 
-Use the reasoning above to determine the email content. Emails are from Callum, co-founder at Calyptus. Keep all emails short and conversational (under 100 words). No subject line needed unless specified.
+Use the reasoning and JD to write the personalization snippet.
 
-- **Score 8-9:**
-
-Hi [First Name],
-
-I came across your profile and think you could be a great match for [role title] at our client. [1-2 sentences summarising what the role involves, drawn from the JD.]
-
-If this sounds interesting, just reply with your resume and we can take it from there.
-
-Callum  
-Co-founder, Calyptus
-
-- **Score 4-7:**
-
-Hi [First Name],
-
-I came across your profile and think you could be a potential match for a [role title] at our client. [1-2 sentences summarising what the role involves, drawn from the JD.]
-
-Before we proceed, we'd love some clarification on a few things: [Insert 2-3 short, specific questions directly based on the gaps or concerns flagged in your Reasoning above. E.g., "Are you open to relocation to X?", "Do you have hands-on experience with Y?", "Can you tell us more about the gap between Z roles?"]
-
-Could you share your resume alongside your answers?
-
-Callum  
-Co-founder, Calyptus
-
-- **Score 0-3:** *(Leave blank)*
+- **Score 4-10:** output 2 plain-text sentences separated by exactly 1 blank line.
+  Sentence 1: candidate fit sentence with role title and location/work mode if present.
+  Sentence 2: one sentence describing what the role does using JD responsibilities.
+  Do not add labels, bullets, numbering, or markdown.
+- **Score 0-3:** leave `Email` empty.
 
 ---
 

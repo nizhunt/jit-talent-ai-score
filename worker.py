@@ -219,8 +219,8 @@ def process_thread_reply_enrichment_job(
             channel_id=channel_id,
             thread_ts=thread_ts,
             text=(
-                "Ignored: this thread is not a pipeline result CSV message thread.\n"
-                "Reply with a threshold in a thread where the root message is the scored CSV result."
+                "Ignored: this thread is not a pipeline result message thread.\n"
+                "Reply with a threshold in a thread where the root message is the scored result."
             ),
         )
         return {"ok": True, "event_id": event_id, "result": result}
@@ -228,11 +228,15 @@ def process_thread_reply_enrichment_job(
     lead_errors = result.get("lead_errors") or []
     campaign_id = result.get("campaign_id")
     campaign_name = result.get("campaign_name")
+    source_name = result.get("source_name") or "N/A"
+    source_url = result.get("source_url") or ""
+    source_url_line = f"Source URL: {source_url}\n" if source_url else ""
     if campaign_id:
         campaign_analytics_url = f"https://app.instantly.ai/app/campaign/{campaign_id}/analytics"
         summary_text = (
             f"Thread enrichment complete.\n"
-            f"CSV: {result.get('csv_filename')}\n"
+            f"Source: {source_name}\n"
+            f"{source_url_line}"
             f"JD Name: {result.get('jd_name') or 'N/A'}\n"
             f"Threshold: {threshold:g}\n"
             f"Rows with score+LinkedIn parsed: {result.get('rows_with_score_and_linkedin')}\n"
@@ -248,7 +252,8 @@ def process_thread_reply_enrichment_job(
     else:
         summary_text = (
             f"Thread enrichment completed with no campaign created.\n"
-            f"CSV: {result.get('csv_filename')}\n"
+            f"Source: {source_name}\n"
+            f"{source_url_line}"
             f"JD Name: {result.get('jd_name') or 'N/A'}\n"
             f"Threshold: {threshold:g}\n"
             f"Rows with score+LinkedIn parsed: {result.get('rows_with_score_and_linkedin')}\n"

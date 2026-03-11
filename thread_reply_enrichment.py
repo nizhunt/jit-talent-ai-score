@@ -1,16 +1,13 @@
-import csv
 import os
 import re
-import sys
-import tempfile
 import time
 from datetime import date, timedelta
-from pathlib import Path
 from typing import Any, Dict, List, Optional
-from urllib.parse import urljoin, urlsplit, urlunsplit
+from urllib.parse import urlsplit, urlunsplit
 
 import requests
 
+from google_sheets import load_rows_from_google_sheet_url
 
 SLACK_CONVERSATIONS_REPLIES_URL = "https://slack.com/api/conversations.replies"
 SLACK_POST_MESSAGE_URL = "https://slack.com/api/chat.postMessage"
@@ -24,9 +21,37 @@ BOUNCEBAN_BULK_DUMP_URL = "https://api.bounceban.com/v1/verify/bulk/dump"
 
 INSTANTLY_CAMPAIGN_CREATE_URL = "https://api.instantly.ai/api/v2/campaigns"
 INSTANTLY_LEAD_CREATE_URL = "https://api.instantly.ai/api/v2/leads"
+INSTANTLY_STEP_ONE_SUBJECT = "New role at a startup!"
+INSTANTLY_STEP_ONE_BODY = (
+    "Hi {{firstName}},\n\n"
+    "{{personalization}}\n\n"
+    "Do you have a few minutes this week? Great to share more\n\n"
+    "Best,\n"
+    "Dan\n"
+    "CEO & Co-founder, Calyptus"
+)
+INSTANTLY_STEP_TWO_BODY = (
+    "Following up here as the team are moving fast, and you have a fantastic profile.\n\n"
+    "Would you be open to chat?\n\n"
+    "Love to connect you with Dianmarie, our senior recruiter who is leading the process!\n\n"
+    "Best,\n"
+    "Dan\n"
+    "CEO & Co-founder, Calyptus"
+)
+INSTANTLY_STEP_THREE_BODY = (
+    "Final follow up from me {{firstName}}\n\n"
+    "If this role is not of interest but you want to be kept updated with other roles at top tech startups, "
+    "coming out of a16z or Antler, then let us know.\n\n"
+    "Our team would love to chat.\n\n"
+    "All the best,\n"
+    "Dan\n"
+    "CEO & Co-founder, Calyptus"
+)
 
-RESULT_MESSAGE_PREFIX_DEFAULT = "AI-scored candidates CSV for this JD"
-_CSV_FIELD_LIMIT_CONFIGURED = False
+RESULT_MESSAGE_PREFIX_DEFAULT = "AI-scored candidates sheet for this JD"
+GOOGLE_SHEET_URL_IN_TEXT_RE = re.compile(
+    r"https://docs\.google\.com/spreadsheets/d/[a-zA-Z0-9-_]+[^\s<>()]*"
+)
 
 
 def parse_threshold_from_text(text: str) -> Optional[float]:
@@ -37,21 +62,6 @@ def parse_threshold_from_text(text: str) -> Optional[float]:
     if not match:
         return None
     return float(match.group(1))
-
-
-def _ensure_large_csv_field_limit() -> None:
-    global _CSV_FIELD_LIMIT_CONFIGURED
-    if _CSV_FIELD_LIMIT_CONFIGURED:
-        return
-
-    max_limit = sys.maxsize
-    while max_limit > 0:
-        try:
-            csv.field_size_limit(max_limit)
-            _CSV_FIELD_LIMIT_CONFIGURED = True
-            return
-        except OverflowError:
-            max_limit //= 10
 
 
 def _require_env(name: str) -> str:
@@ -130,6 +140,23 @@ def _clean_company_name(name: str) -> str:
 
 def _normalize_email(email: str) -> str:
     return (email or "").strip().lower()
+
+
+def _clean_personalization_snippet(generated_email: str) -> str:
+    text = (generated_email or "").strip()
+    if not text:
+        return ""
+
+    cleaned_lines: List[str] = []
+    for raw_line in text.splitlines():
+        stripped = raw_line.strip()
+        tag_match = re.match(r"^line\s*[123]\s*:\s*(.*)$", stripped, flags=re.IGNORECASE)
+        if tag_match:
+            cleaned_lines.append(tag_match.group(1).strip())
+        else:
+            cleaned_lines.append(raw_line.rstrip())
+
+    return "\n".join(cleaned_lines).strip()
 
 
 def _normalize_linkedin_url(url: str) -> str:
@@ -256,17 +283,6 @@ def _get_thread_root_message(slack_token: str, channel_id: str, thread_ts: str) 
     return messages[0]
 
 
-def _extract_csv_file_info_from_message(message: Dict[str, Any]) -> Dict[str, Any]:
-    files = message.get("files") or []
-    for item in files:
-        mimetype = (item.get("mimetype") or "").lower()
-        filetype = (item.get("filetype") or "").lower()
-        name = (item.get("name") or "").lower()
-        if mimetype == "text/csv" or filetype == "csv" or name.endswith(".csv"):
-            return item
-    raise RuntimeError("Thread root message does not include a CSV file.")
-
-
 def _extract_jd_name_from_message(message: Dict[str, Any]) -> str:
     text = (message.get("text") or "").strip()
     if not text:
@@ -295,7 +311,7 @@ def _collect_text_values(value: Any, out: List[str]) -> None:
             _collect_text_values(nested, out)
 
 
-def _extract_thread_root_text_for_validation(message: Dict[str, Any]) -> str:
+def _collect_thread_root_text_parts(message: Dict[str, Any]) -> List[str]:
     parts: List[str] = []
     _collect_text_values(message.get("text"), parts)
     _collect_text_values(message.get("blocks"), parts)
@@ -304,18 +320,44 @@ def _extract_thread_root_text_for_validation(message: Dict[str, Any]) -> str:
     # File-share roots may keep the initial comment under the file payload.
     for item in message.get("files") or []:
         _collect_text_values(item.get("initial_comment"), parts)
+    return parts
 
+
+def _extract_thread_root_text_for_validation(message: Dict[str, Any]) -> str:
+    parts = _collect_thread_root_text_parts(message)
     return "\n".join(parts).strip().lower()
 
 
-def _is_result_message_thread_root(message: Dict[str, Any], csv_file: Dict[str, Any]) -> bool:
+def _extract_google_sheet_url_from_text(text: str) -> str:
+    if not text:
+        return ""
+
+    slack_url_match = re.search(
+        r"<(https://docs\.google\.com/spreadsheets/d/[a-zA-Z0-9-_]+[^>|]*)(?:\|[^>]+)?>",
+        text,
+    )
+    if slack_url_match:
+        return slack_url_match.group(1).strip()
+
+    url_match = GOOGLE_SHEET_URL_IN_TEXT_RE.search(text)
+    if not url_match:
+        return ""
+    return url_match.group(0).rstrip(").,")
+
+
+def _extract_google_sheet_url_from_message(message: Dict[str, Any]) -> str:
+    for part in _collect_thread_root_text_parts(message):
+        url = _extract_google_sheet_url_from_text(part)
+        if url:
+            return url
+    return ""
+
+
+def _is_result_message_thread_root(message: Dict[str, Any], sheet_url: str) -> bool:
     text = _extract_thread_root_text_for_validation(message)
     prefix = os.getenv("RESULT_MESSAGE_PREFIX", RESULT_MESSAGE_PREFIX_DEFAULT).strip().lower()
     strict = _is_truthy(os.getenv("THREAD_RESULT_STRICT"), default=True)
-
-    name = (csv_file.get("name") or "").strip().lower()
-    title = (csv_file.get("title") or "").strip().lower()
-    filename_hint = "sheet-ready" in name or "sheet-ready" in title or "scored" in name or "scored" in title
+    has_sheet_link = bool(sheet_url)
 
     has_prefix = bool(prefix and prefix in text)
     has_new_summary_markers = (
@@ -325,106 +367,69 @@ def _is_result_message_thread_root(message: Dict[str, Any], csv_file: Dict[str, 
         and "linkedin samples by score:" in text
     )
     if strict:
-        return has_prefix or has_new_summary_markers or filename_hint
-    return has_prefix or filename_hint or has_new_summary_markers
+        return has_sheet_link and (has_prefix or has_new_summary_markers)
+    return has_sheet_link and (has_prefix or has_new_summary_markers or not prefix)
 
 
-def _download_slack_file(slack_token: str, url: str, destination: Path) -> None:
-    current_url = url
-    max_redirects = 8
-
-    for _ in range(max_redirects):
-        response = requests.get(
-            current_url,
-            headers=_slack_headers(slack_token),
-            timeout=120,
-            allow_redirects=False,
+def _load_candidates_from_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    candidates: List[Dict[str, Any]] = []
+    for row in rows:
+        score = _to_float(
+            _pick_first(
+                row,
+                [
+                    "AI Score",
+                    "ai-score",
+                    "ai_score",
+                    "Score",
+                    "score",
+                ],
+            )
         )
-
-        if response.status_code in {301, 302, 303, 307, 308}:
-            location = response.headers.get("Location")
-            if not location:
-                raise RuntimeError("Slack file download redirect missing Location header.")
-            current_url = urljoin(current_url, location)
+        linkedin = _normalize_linkedin_url(
+            _pick_first(
+                row,
+                [
+                    "LinkedIn",
+                    "linkedin",
+                    "Linkedin",
+                    "hs_linkedin_url",
+                    "URL",
+                ],
+            )
+        )
+        if score is None or not linkedin:
             continue
 
-        response.raise_for_status()
-        content = response.content
-        content_type = (response.headers.get("Content-Type") or "").lower()
-        sniff = content[:300].decode("utf-8", errors="ignore").lower()
-        if "text/html" in content_type or "<html" in sniff or "<!doctype html" in sniff:
-            raise RuntimeError(
-                "Slack file download returned HTML instead of CSV. "
-                "Ensure Slack app has files:read scope and was reinstalled."
-            )
-        destination.write_bytes(content)
-        return
-
-    raise RuntimeError("Slack file download exceeded redirect limit.")
-
-
-def _load_candidates_from_csv(csv_path: Path) -> List[Dict[str, Any]]:
-    _ensure_large_csv_field_limit()
-    candidates: List[Dict[str, Any]] = []
-    with csv_path.open("r", encoding="utf-8-sig", newline="") as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            score = _to_float(
-                _pick_first(
+        candidates.append(
+            {
+                "score": score,
+                "linkedin_url": linkedin,
+                "first_name": _pick_first(row, ["First Name", "first_name", "firstname"]),
+                "last_name": _pick_first(row, ["Last Name", "last_name", "lastname"]),
+                "generated_email": _pick_first(
                     row,
                     [
-                        "AI Score",
-                        "ai-score",
-                        "ai_score",
-                        "Score",
-                        "score",
+                        "AI Email",
+                        "ai-email",
+                        "ai_email",
+                        "Generated Email",
+                        "generated_email",
                     ],
-                )
-            )
-            linkedin = _normalize_linkedin_url(
-                _pick_first(
+                ),
+                "company_name": _pick_first(
                     row,
                     [
-                        "LinkedIn",
-                        "linkedin",
-                        "Linkedin",
-                        "hs_linkedin_url",
-                        "URL",
+                        "Current Company",
+                        "current_company",
+                        "Company",
+                        "company",
+                        "Company Name",
+                        "company_name",
                     ],
-                )
-            )
-            if score is None or not linkedin:
-                continue
-
-            candidates.append(
-                {
-                    "score": score,
-                    "linkedin_url": linkedin,
-                    "first_name": _pick_first(row, ["First Name", "first_name", "firstname"]),
-                    "last_name": _pick_first(row, ["Last Name", "last_name", "lastname"]),
-                    "generated_email": _pick_first(
-                        row,
-                        [
-                            "AI Email",
-                            "ai-email",
-                            "ai_email",
-                            "Generated Email",
-                            "generated_email",
-                        ],
-                    ),
-                    "company_name": _pick_first(
-                        row,
-                        [
-                            "Current Company",
-                            "current_company",
-                            "Company",
-                            "company",
-                            "Company Name",
-                            "company_name",
-                        ],
-                    ),
-                }
-            )
+                ),
+            }
+        )
     return candidates
 
 
@@ -661,7 +666,17 @@ def _create_instantly_campaign(instantly_api_key: str, threshold: float, jd_name
                     {
                         "type": "email",
                         "delay": 0,
-                        "variants": [{"subject": "", "body": ""}],
+                        "variants": [{"subject": INSTANTLY_STEP_ONE_SUBJECT, "body": INSTANTLY_STEP_ONE_BODY}],
+                    },
+                    {
+                        "type": "email",
+                        "delay": 2,
+                        "variants": [{"subject": "", "body": INSTANTLY_STEP_TWO_BODY}],
+                    },
+                    {
+                        "type": "email",
+                        "delay": 2,
+                        "variants": [{"subject": "", "body": INSTANTLY_STEP_THREE_BODY}],
                     }
                 ]
             }
@@ -689,7 +704,8 @@ def _add_lead_to_instantly_campaign(
 ) -> Dict[str, Any]:
     linkedin_url = lead.get("linkedin_url", "")
     generated_email = (lead.get("generated_email") or "").strip()
-    personalization = generated_email if generated_email else (f"LinkedIn: {linkedin_url}" if linkedin_url else "")
+    personalization_body = _clean_personalization_snippet(generated_email)
+    personalization = personalization_body if personalization_body else (f"LinkedIn: {linkedin_url}" if linkedin_url else "")
     payload = {
         "email": lead["email"],
         "campaign": campaign_id,
@@ -739,176 +755,186 @@ def run_thread_reply_enrichment_pipeline(
             _slack_post_message(slack_token=slack_token, channel_id=channel_id, thread_ts=thread_ts, text=text)
 
     root_message = _get_thread_root_message(slack_token=slack_token, channel_id=channel_id, thread_ts=thread_ts)
-    csv_file = _extract_csv_file_info_from_message(root_message)
+    sheet_url = _extract_google_sheet_url_from_message(root_message)
     jd_name = _extract_jd_name_from_message(root_message)
-    if not _is_result_message_thread_root(root_message, csv_file):
+    source_type = "google_sheet"
+    source_name = sheet_url or "unknown"
+    source_url = sheet_url if sheet_url else None
+
+    def _result_source_fields() -> Dict[str, Any]:
+        return {
+            "source_type": source_type,
+            "source_name": source_name,
+            "source_url": source_url,
+        }
+
+    if not _is_result_message_thread_root(root_message, sheet_url):
         return {
             "ignored": "not_result_message_thread",
             "threshold": threshold,
-            "csv_filename": csv_file.get("name") or "unknown.csv",
             "jd_name": jd_name,
             "campaign_id": None,
             "campaign_name": None,
             "leads_added": 0,
             "lead_errors": [],
+            **_result_source_fields(),
         }
-    file_url = csv_file.get("url_private_download") or csv_file.get("url_private")
-    if not file_url:
-        raise RuntimeError("CSV file is missing url_private_download/url_private.")
 
-    with tempfile.TemporaryDirectory(prefix="jit-thread-enrich-") as tmp_dir:
-        csv_path = Path(tmp_dir) / (csv_file.get("name") or "scored.csv")
-        _download_slack_file(slack_token=slack_token, url=file_url, destination=csv_path)
+    if not sheet_url:
+        raise RuntimeError("Thread root message must include a Google Sheet link.")
+    sheet_payload = load_rows_from_google_sheet_url(sheet_url)
+    source_name = (sheet_payload.get("spreadsheet_title") or source_name).strip()
+    source_url = sheet_payload.get("spreadsheet_url") or sheet_url
+    all_candidates = _load_candidates_from_rows(sheet_payload.get("rows") or [])
 
-        all_candidates = _load_candidates_from_csv(csv_path)
-        threshold_candidates = [c for c in all_candidates if c["score"] >= threshold]
-        threshold_candidates = [c for c in threshold_candidates if c["linkedin_url"]]
+    threshold_candidates = [c for c in all_candidates if c["score"] >= threshold]
+    threshold_candidates = [c for c in threshold_candidates if c["linkedin_url"]]
 
-        if not threshold_candidates:
-            return {
-                "threshold": threshold,
-                "csv_filename": csv_file.get("name") or "scored.csv",
-                "jd_name": jd_name,
-                "rows_with_score_and_linkedin": len(all_candidates),
-                "rows_meeting_threshold": 0,
-                "salesql_emails_found": 0,
-                "reoon_passed": 0,
-                "bounceban_deliverable": 0,
-                "campaign_id": None,
-                "campaign_name": None,
-                "leads_added": 0,
-                "lead_errors": [],
-            }
-
-        _update(f"Threshold {threshold:g} accepted {len(threshold_candidates)} candidates. Enriching emails via SaleSQL...")
-
-        metadata_by_email = _build_email_metadata_from_salesql(
-            candidates=threshold_candidates,
-            salesql_api_key=salesql_api_key,
-        )
-        all_emails = _dedupe_preserve_order(list(metadata_by_email.keys()))
-        if not all_emails:
-            return {
-                "threshold": threshold,
-                "csv_filename": csv_file.get("name") or "scored.csv",
-                "jd_name": jd_name,
-                "rows_with_score_and_linkedin": len(all_candidates),
-                "rows_meeting_threshold": len(threshold_candidates),
-                "salesql_emails_found": 0,
-                "reoon_passed": 0,
-                "bounceban_deliverable": 0,
-                "campaign_id": None,
-                "campaign_name": None,
-                "leads_added": 0,
-                "lead_errors": [],
-            }
-
-        _update(f"SaleSQL found {len(all_emails)} emails. Sending to Reoon...")
-        reoon_task_id = _submit_reoon_task(reoon_api_key=reoon_api_key, emails=all_emails)
-        try:
-            reoon_result = _poll_reoon_task(reoon_api_key=reoon_api_key, task_id=reoon_task_id)
-        except RuntimeError as exc:
-            message = str(exc)
-            if "Timed out waiting for Reoon task" not in message:
-                raise
-            _update(
-                f"Reoon task `{reoon_task_id}` did not finish in time. "
-                "Stopping this run without campaign creation."
-            )
-            return {
-                "threshold": threshold,
-                "csv_filename": csv_file.get("name") or "scored.csv",
-                "jd_name": jd_name,
-                "rows_with_score_and_linkedin": len(all_candidates),
-                "rows_meeting_threshold": len(threshold_candidates),
-                "salesql_emails_found": len(all_emails),
-                "reoon_passed": 0,
-                "bounceban_deliverable": 0,
-                "campaign_id": None,
-                "campaign_name": None,
-                "leads_added": 0,
-                "lead_errors": [],
-                "note": message,
-            }
-        reoon_passed = _dedupe_preserve_order(_filter_reoon_results(reoon_result=reoon_result, input_emails=all_emails))
-
-        if not reoon_passed:
-            return {
-                "threshold": threshold,
-                "csv_filename": csv_file.get("name") or "scored.csv",
-                "jd_name": jd_name,
-                "rows_with_score_and_linkedin": len(all_candidates),
-                "rows_meeting_threshold": len(threshold_candidates),
-                "salesql_emails_found": len(all_emails),
-                "reoon_passed": 0,
-                "bounceban_deliverable": 0,
-                "campaign_id": None,
-                "campaign_name": None,
-                "leads_added": 0,
-                "lead_errors": [],
-            }
-
-        _update(f"Reoon passed {len(reoon_passed)} emails. Sending to BounceBan...")
-        bounceban_task_id = _submit_bounceban_task(bounceban_api_key=bounceban_api_key, emails=reoon_passed)
-        _poll_bounceban_completion(bounceban_api_key=bounceban_api_key, task_id=bounceban_task_id)
-        bounceban_dump = _fetch_bounceban_dump(bounceban_api_key=bounceban_api_key, task_id=bounceban_task_id)
-        deliverable = _dedupe_preserve_order(
-            _filter_bounceban_deliverables(dump_payload=bounceban_dump, input_emails=reoon_passed)
-        )
-
-        if not deliverable:
-            return {
-                "threshold": threshold,
-                "csv_filename": csv_file.get("name") or "scored.csv",
-                "jd_name": jd_name,
-                "rows_with_score_and_linkedin": len(all_candidates),
-                "rows_meeting_threshold": len(threshold_candidates),
-                "salesql_emails_found": len(all_emails),
-                "reoon_passed": len(reoon_passed),
-                "bounceban_deliverable": 0,
-                "campaign_id": None,
-                "campaign_name": None,
-                "leads_added": 0,
-                "lead_errors": [],
-            }
-
-        _update(f"BounceBan deliverable: {len(deliverable)}. Creating Instantly campaign...")
-        campaign = _create_instantly_campaign(
-            instantly_api_key=instantly_api_key,
-            threshold=threshold,
-            jd_name=jd_name,
-        )
-        campaign_id = campaign["id"]
-        campaign_name = campaign["name"]
-
-        lead_errors: List[str] = []
-        added_count = 0
-        fail_fast = _is_truthy(os.getenv("INSTANTLY_FAIL_FAST"), default=False)
-        for email in deliverable:
-            lead_meta = metadata_by_email.get(email) or {"email": email}
-            try:
-                _add_lead_to_instantly_campaign(
-                    instantly_api_key=instantly_api_key,
-                    campaign_id=campaign_id,
-                    lead=lead_meta,
-                )
-                added_count += 1
-            except Exception as exc:
-                lead_errors.append(f"{email}: {exc}")
-                if fail_fast:
-                    raise
-
+    if not threshold_candidates:
         return {
             "threshold": threshold,
-            "csv_filename": csv_file.get("name") or "scored.csv",
+            "jd_name": jd_name,
+            "rows_with_score_and_linkedin": len(all_candidates),
+            "rows_meeting_threshold": 0,
+            "salesql_emails_found": 0,
+            "reoon_passed": 0,
+            "bounceban_deliverable": 0,
+            "campaign_id": None,
+            "campaign_name": None,
+            "leads_added": 0,
+            "lead_errors": [],
+            **_result_source_fields(),
+        }
+
+    _update(f"Threshold {threshold:g} accepted {len(threshold_candidates)} candidates. Enriching emails via SaleSQL...")
+
+    metadata_by_email = _build_email_metadata_from_salesql(
+        candidates=threshold_candidates,
+        salesql_api_key=salesql_api_key,
+    )
+    all_emails = _dedupe_preserve_order(list(metadata_by_email.keys()))
+    if not all_emails:
+        return {
+            "threshold": threshold,
+            "jd_name": jd_name,
+            "rows_with_score_and_linkedin": len(all_candidates),
+            "rows_meeting_threshold": len(threshold_candidates),
+            "salesql_emails_found": 0,
+            "reoon_passed": 0,
+            "bounceban_deliverable": 0,
+            "campaign_id": None,
+            "campaign_name": None,
+            "leads_added": 0,
+            "lead_errors": [],
+            **_result_source_fields(),
+        }
+
+    _update(f"SaleSQL found {len(all_emails)} emails. Sending to Reoon...")
+    reoon_task_id = _submit_reoon_task(reoon_api_key=reoon_api_key, emails=all_emails)
+    try:
+        reoon_result = _poll_reoon_task(reoon_api_key=reoon_api_key, task_id=reoon_task_id)
+    except RuntimeError as exc:
+        message = str(exc)
+        if "Timed out waiting for Reoon task" not in message:
+            raise
+        _update(
+            f"Reoon task `{reoon_task_id}` did not finish in time. "
+            "Stopping this run without campaign creation."
+        )
+        return {
+            "threshold": threshold,
+            "jd_name": jd_name,
+            "rows_with_score_and_linkedin": len(all_candidates),
+            "rows_meeting_threshold": len(threshold_candidates),
+            "salesql_emails_found": len(all_emails),
+            "reoon_passed": 0,
+            "bounceban_deliverable": 0,
+            "campaign_id": None,
+            "campaign_name": None,
+            "leads_added": 0,
+            "lead_errors": [],
+            "note": message,
+            **_result_source_fields(),
+        }
+    reoon_passed = _dedupe_preserve_order(_filter_reoon_results(reoon_result=reoon_result, input_emails=all_emails))
+
+    if not reoon_passed:
+        return {
+            "threshold": threshold,
+            "jd_name": jd_name,
+            "rows_with_score_and_linkedin": len(all_candidates),
+            "rows_meeting_threshold": len(threshold_candidates),
+            "salesql_emails_found": len(all_emails),
+            "reoon_passed": 0,
+            "bounceban_deliverable": 0,
+            "campaign_id": None,
+            "campaign_name": None,
+            "leads_added": 0,
+            "lead_errors": [],
+            **_result_source_fields(),
+        }
+
+    _update(f"Reoon passed {len(reoon_passed)} emails. Sending to BounceBan...")
+    bounceban_task_id = _submit_bounceban_task(bounceban_api_key=bounceban_api_key, emails=reoon_passed)
+    _poll_bounceban_completion(bounceban_api_key=bounceban_api_key, task_id=bounceban_task_id)
+    bounceban_dump = _fetch_bounceban_dump(bounceban_api_key=bounceban_api_key, task_id=bounceban_task_id)
+    deliverable = _dedupe_preserve_order(
+        _filter_bounceban_deliverables(dump_payload=bounceban_dump, input_emails=reoon_passed)
+    )
+
+    if not deliverable:
+        return {
+            "threshold": threshold,
             "jd_name": jd_name,
             "rows_with_score_and_linkedin": len(all_candidates),
             "rows_meeting_threshold": len(threshold_candidates),
             "salesql_emails_found": len(all_emails),
             "reoon_passed": len(reoon_passed),
-            "bounceban_deliverable": len(deliverable),
-            "campaign_id": campaign_id,
-            "campaign_name": campaign_name,
-            "leads_added": added_count,
-            "lead_errors": lead_errors,
+            "bounceban_deliverable": 0,
+            "campaign_id": None,
+            "campaign_name": None,
+            "leads_added": 0,
+            "lead_errors": [],
+            **_result_source_fields(),
         }
+
+    _update(f"BounceBan deliverable: {len(deliverable)}. Creating Instantly campaign...")
+    campaign = _create_instantly_campaign(
+        instantly_api_key=instantly_api_key,
+        threshold=threshold,
+        jd_name=jd_name,
+    )
+    campaign_id = campaign["id"]
+    campaign_name = campaign["name"]
+
+    lead_errors: List[str] = []
+    added_count = 0
+    fail_fast = _is_truthy(os.getenv("INSTANTLY_FAIL_FAST"), default=False)
+    for email in deliverable:
+        lead_meta = metadata_by_email.get(email) or {"email": email}
+        try:
+            _add_lead_to_instantly_campaign(
+                instantly_api_key=instantly_api_key,
+                campaign_id=campaign_id,
+                lead=lead_meta,
+            )
+            added_count += 1
+        except Exception as exc:
+            lead_errors.append(f"{email}: {exc}")
+            if fail_fast:
+                raise
+
+    return {
+        "threshold": threshold,
+        "jd_name": jd_name,
+        "rows_with_score_and_linkedin": len(all_candidates),
+        "rows_meeting_threshold": len(threshold_candidates),
+        "salesql_emails_found": len(all_emails),
+        "reoon_passed": len(reoon_passed),
+        "bounceban_deliverable": len(deliverable),
+        "campaign_id": campaign_id,
+        "campaign_name": campaign_name,
+        "leads_added": added_count,
+        "lead_errors": lead_errors,
+        **_result_source_fields(),
+    }

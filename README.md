@@ -3,7 +3,7 @@
 Slack `# JD` ingestion + Exa sourcing + AI scoring pipeline.
 
 Additional isolated workflow:
-- thread reply to a scored CSV message with an exact integer threshold `1` to `10` and no other text (for example `5`)
+- thread reply to a scored result message with a Google Sheet link and an exact integer threshold `1` to `10` and no other text (for example `5`)
 - filters `AI Score >= threshold`
 - enriches emails via SaleSQL (only emails where `type=Direct` and valid: `is_valid=true` or fallback `status=Valid`)
 - verifies via Reoon then BounceBan
@@ -23,7 +23,7 @@ Additional isolated workflow:
   - generate 15 Exa prompts
   - fetch Exa results
   - CSV + dedup + score
-  - post step updates + final CSV back to Slack
+  - post step updates + final result summary + Google Sheet link to Slack
 
 ## JD Message Format
 
@@ -34,7 +34,7 @@ Supported header formats:
 
 When a name is provided, it is used in:
 - processing/progress/failure Slack messages
-- final upload comment (`JD Name: ...`)
+- final result message (`JD Name: ...`)
 - output CSV filenames inside the worker run (slugged)
 - Instantly campaign name during thread-reply enrichment
 
@@ -54,6 +54,9 @@ Set these in both:
 - `REOON_API_KEY` (thread-reply enrichment workflow)
 - `BOUNCEBAN_API_KEY` (thread-reply enrichment workflow)
 - `INSTANTLY_API_KEY` (thread-reply enrichment workflow)
+- `GOOGLE_SERVICE_ACCOUNT_JSON` (service account JSON, raw or base64-encoded JSON)
+- `GOOGLE_DRIVE_FOLDER_ID` (Drive folder or Shared Drive folder where result sheets will be created)
+- `GOOGLE_WORKSPACE_DOMAIN` (for domain-restricted link sharing, e.g. `calyptus.co`)
 
 Optional:
 - `SLACK_CHANNEL_ID` (default `C0AF5RGPMEW`)
@@ -83,7 +86,8 @@ Optional:
 - `BOUNCEBAN_POLL_INTERVAL_SECONDS` (default `15`)
 - `INSTANTLY_FAIL_FAST` (default `false`; abort immediately on first Instantly lead add error)
 - `THREAD_RESULT_STRICT` (default `true`; only allow thread-reply enrichment when thread root text matches result message prefix)
-- `RESULT_MESSAGE_PREFIX` (default `AI-scored candidates CSV for this JD`)
+- `RESULT_MESSAGE_PREFIX` (default `AI-scored candidates sheet for this JD`)
+- `GOOGLE_WORKSPACE_DOMAIN_ROLE` (default `writer`; set `reader` or `commenter` if needed)
 - `THREAD_ENRICHMENT_VERBOSE_UPDATES` (default `false`; if true, posts intermediate stage updates in thread)
 
 ## Slack App Setup
@@ -94,8 +98,6 @@ Optional:
 - `message.channels`
 4. OAuth scopes:
 - `chat:write`
-- `files:write`
-- `files:read` (required for thread-reply enrichment to download Slack CSV)
 - `channels:history`
 5. Reinstall app after scope/event changes.
 6. Invite bot to the target channel.

@@ -19,6 +19,8 @@ from dotenv import load_dotenv
 from openai import OpenAI
 from tqdm import tqdm
 
+from google_sheets import create_google_sheet_from_dataframe
+
 try:
     from exa_py import Exa
 except ImportError:
@@ -28,8 +30,6 @@ except ImportError:
 CHANNEL_ID_DEFAULT = "C0AF5RGPMEW"
 SLACK_HISTORY_URL = "https://slack.com/api/conversations.history"
 SLACK_POST_MESSAGE_URL = "https://slack.com/api/chat.postMessage"
-SLACK_GET_UPLOAD_URL_EXTERNAL = "https://slack.com/api/files.getUploadURLExternal"
-SLACK_COMPLETE_UPLOAD_EXTERNAL = "https://slack.com/api/files.completeUploadExternal"
 
 STAGES = ["fetch_jd", "generate_queries", "exa_search", "csv", "dedup", "score", "post"]
 
@@ -1263,70 +1263,6 @@ def compute_cost_summary(
     }
 
 
-def upload_csv_to_slack(
-    slack_token: str,
-    channel_id: str,
-    csv_path: str,
-    initial_comment: str,
-) -> Dict[str, Any]:
-    headers = {"Authorization": f"Bearer {slack_token}"}
-    filename = os.path.basename(csv_path)
-    file_size = os.path.getsize(csv_path)
-
-    # Step 1: ask Slack for an external upload URL.
-    get_upload_resp = requests.post(
-        SLACK_GET_UPLOAD_URL_EXTERNAL,
-        headers=headers,
-        data={
-            "filename": filename,
-            "length": str(file_size),
-        },
-        timeout=60,
-    )
-    get_upload_resp.raise_for_status()
-    get_upload_payload = get_upload_resp.json()
-    if not get_upload_payload.get("ok"):
-        raise RuntimeError(f"Slack getUploadURLExternal failed: {get_upload_payload.get('error')}")
-
-    upload_url = get_upload_payload.get("upload_url")
-    file_id = get_upload_payload.get("file_id")
-    if not upload_url or not file_id:
-        raise RuntimeError("Slack getUploadURLExternal returned missing upload_url or file_id.")
-
-    # Step 2: upload file bytes to the pre-signed URL.
-    with open(csv_path, "rb") as f:
-        upload_resp = requests.post(
-            upload_url,
-            files={"file": (filename, f, "text/csv")},
-            timeout=120,
-        )
-    upload_resp.raise_for_status()
-
-    # Step 3: finalize upload and share in channel.
-    complete_resp = requests.post(
-        SLACK_COMPLETE_UPLOAD_EXTERNAL,
-        headers=headers,
-        data={
-            "files": json.dumps([{"id": file_id, "title": filename}]),
-            "channel_id": channel_id,
-            "initial_comment": initial_comment,
-        },
-        timeout=60,
-    )
-    complete_resp.raise_for_status()
-    complete_payload = complete_resp.json()
-    if not complete_payload.get("ok"):
-        raise RuntimeError(f"Slack completeUploadExternal failed: {complete_payload.get('error')}")
-
-    # Keep backward compatibility with callsites expecting payload['file'].
-    if "file" not in complete_payload:
-        files = complete_payload.get("files")
-        if isinstance(files, list) and files:
-            complete_payload["file"] = files[0]
-
-    return complete_payload
-
-
 def build_score_tally_lines(scored_df: pd.DataFrame) -> List[str]:
     if "ai-score" not in scored_df.columns:
         return []
@@ -1450,6 +1386,24 @@ def format_jd_label(jd_name: str) -> str:
     if not cleaned:
         return ""
     return f"[{cleaned}] "
+
+
+def build_sheet_title(jd_name: str, scored_csv_path: str) -> str:
+    clean_name = normalize_whitespace(jd_name)
+    if clean_name:
+        return clean_name
+    base_name = os.path.splitext(os.path.basename(scored_csv_path))[0]
+    timestamp = datetime.utcnow().strftime("%Y%m%d-%H%M%S")
+    return f"{base_name}-{timestamp}"
+
+
+def get_google_domain_role() -> str:
+    role = normalize_whitespace(os.getenv("GOOGLE_WORKSPACE_DOMAIN_ROLE", "writer")).lower()
+    allowed = {"reader", "commenter", "writer"}
+    if role in allowed:
+        return role
+    print(f"[warn] invalid GOOGLE_WORKSPACE_DOMAIN_ROLE={role!r}; using 'writer'")
+    return "writer"
 
 
 def run_pipeline_from_jd_text(
@@ -1604,7 +1558,7 @@ def run_pipeline_from_jd_text(
     # Drop the heavy raw_json column before writing the sheet-ready CSV.
     if "raw_json" in scored_df.columns:
         scored_df.drop(columns=["raw_json"], inplace=True)
-    write_sheet_ready_csv(sheet_ready_csv, scored_df)
+    sheet_ready_df = write_sheet_ready_csv(sheet_ready_csv, scored_df)
     all_queries.clear()
     jd_context_by_prompt_file.clear()
     gc.collect()
@@ -1643,8 +1597,22 @@ def run_pipeline_from_jd_text(
         cost_per_find_line = f"Est. cost/find (score >= 5): ${cost_summary['per_find']:.4f}\n"
     else:
         cost_per_find_line = "Est. cost/find (score >= 5): N/A (no candidates scored 5+)\n"
-    upload_comment = (
+    sheet_title = build_sheet_title(jd_name=jd_name, scored_csv_path=args.scored_csv)
+    google_sheet = create_google_sheet_from_dataframe(
+        df=sheet_ready_df,
+        spreadsheet_title=sheet_title,
+        folder_id=require_env("GOOGLE_DRIVE_FOLDER_ID"),
+        workspace_domain=require_env("GOOGLE_WORKSPACE_DOMAIN"),
+        domain_role=get_google_domain_role(),
+    )
+    google_sheet_url = google_sheet["spreadsheet_url"]
+    result_prefix = normalize_whitespace(os.getenv("RESULT_MESSAGE_PREFIX", "AI-scored candidates sheet for this JD"))
+    prefix_line = f"{result_prefix}\n" if result_prefix else ""
+
+    result_message_text = (
+        f"{prefix_line}"
         f"{jd_name_line}"
+        f"Google Sheet: {google_sheet_url}\n"
         f"Scored: {rows_scored}\n"
         f"Finds (score >= 5): {qualified_finds}\n"
         f"{cost_per_find_line}"
@@ -1652,13 +1620,11 @@ def run_pipeline_from_jd_text(
         f"Score Tally:\n{tally_block}\n\n"
         f"{'\n'.join(linkedin_sample_lines) if linkedin_sample_lines else 'LinkedIn samples by score: unavailable'}"
     )
-    slack_upload = upload_csv_to_slack(
+    post_slack_message(
         slack_token=slack_token,
         channel_id=args.channel_id,
-        csv_path=sheet_ready_csv,
-        initial_comment=upload_comment,
+        text=result_message_text,
     )
-    file_id = (slack_upload.get("file") or {}).get("id")
 
     maybe_stop(args.stop_after, "post")
 
@@ -1668,7 +1634,10 @@ def run_pipeline_from_jd_text(
         "rows_before_dedup": rows_before_dedup,
         "rows_after_dedup": rows_after_dedup,
         "rows_scored": rows_scored,
-        "uploaded_file_id": file_id,
+        "uploaded_file_id": None,
+        "google_sheet_id": google_sheet.get("spreadsheet_id"),
+        "google_sheet_url": google_sheet_url,
+        "google_sheet_title": google_sheet.get("spreadsheet_title"),
         "sheet_ready_csv": sheet_ready_csv,
         "queries_log_path": None,
         "cost_summary": cost_summary,
