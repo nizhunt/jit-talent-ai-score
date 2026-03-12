@@ -78,11 +78,17 @@ def _extract_google_http_error_message(exc: HttpError) -> str:
 def _raise_google_http_error(action: str, exc: HttpError) -> None:
     status_code = getattr(getattr(exc, "resp", None), "status", None) or getattr(exc, "status_code", None)
     detail = _extract_google_http_error_message(exc)
+    detail_lower = detail.lower() if detail else ""
     parts = [f"Google API failed while trying to {action}."]
     if status_code:
         parts.append(f"HTTP {status_code}.")
     if detail:
         parts.append(detail)
+    if "storagequotaexceeded" in detail_lower or "storage quota has been exceeded" in detail_lower:
+        parts.append(
+            "Drive quota is full for the file owner context. "
+            "Use a Shared Drive folder in GOOGLE_DRIVE_FOLDER_ID, or free storage for the owning account."
+        )
     if status_code == 403:
         parts.append(
             "Verify GOOGLE_SERVICE_ACCOUNT_JSON has Sheets/Drive API access, "

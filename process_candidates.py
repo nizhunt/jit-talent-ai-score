@@ -1462,6 +1462,15 @@ def run_pipeline_from_jd_text(
     write_text_file(args.jd_path, jd_text)
     print(f"Wrote JD text to {args.jd_path}")
 
+    # Fail before Exa/OpenAI-heavy stages if result sheet creation is blocked.
+    sheet_title = build_sheet_title(jd_name=jd_name, scored_csv_path=args.scored_csv)
+    google_sheet = create_google_sheet_placeholder(
+        spreadsheet_title=sheet_title,
+        folder_id=require_env("GOOGLE_DRIVE_FOLDER_ID"),
+        workspace_domain=require_env("GOOGLE_WORKSPACE_DOMAIN"),
+        domain_role=get_google_domain_role(),
+    )
+
     # --- Stage: widen JD, generate queries, search Exa, and flatten — in batches ---
     debug_pause(args.debug, "generate_queries")
 
@@ -1591,16 +1600,6 @@ def run_pipeline_from_jd_text(
     gc.collect()
 
     maybe_stop(args.stop_after, "dedup")
-
-    # Create the result sheet before the expensive scoring stage so Google permission
-    # issues fail fast instead of after full scoring completes.
-    sheet_title = build_sheet_title(jd_name=jd_name, scored_csv_path=args.scored_csv)
-    google_sheet = create_google_sheet_placeholder(
-        spreadsheet_title=sheet_title,
-        folder_id=require_env("GOOGLE_DRIVE_FOLDER_ID"),
-        workspace_domain=require_env("GOOGLE_WORKSPACE_DOMAIN"),
-        domain_role=get_google_domain_role(),
-    )
 
     debug_pause(args.debug, "score")
 
