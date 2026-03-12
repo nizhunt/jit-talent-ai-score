@@ -4,6 +4,8 @@ You are an unbiased recruiter. Compare the candidate LinkedIn data with the Job 
 
 - Candidate location is incompatible with JD location/onsite requirements (e.g., "must be in UK", "no relocation", "no remote"). Verify country carefully. 
 
+- If the JD explicitly requires English and the candidate information is not in English, score 0.
+
 
 - Role type mismatch: If JD is for an individual contrubutor role and candidate is purely Managerial, with no recent hands-on work, or similar non-technical role → score 2-3 maximum.
 
@@ -82,7 +84,7 @@ If they pass the disqualifiers, score based on fit. **Do NOT disqualify for miss
     
 - If critical info is missing, note it and score conservatively  
     
-- Do not zero out candidates unless they violate location/auth/role-type rules
+- Do not zero out candidates unless they violate location/auth/role-type/language rules
 
 ---
 
