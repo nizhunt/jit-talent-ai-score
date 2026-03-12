@@ -2,7 +2,8 @@ import base64
 import json
 import os
 import re
-from typing import Any, Dict, List, Optional
+import time
+from typing import Any, Callable, Dict, List, Optional
 
 import pandas as pd
 from google.oauth2.service_account import Credentials
@@ -13,6 +14,12 @@ from googleapiclient.errors import HttpError
 GOOGLE_SHEETS_SCOPE = "https://www.googleapis.com/auth/spreadsheets"
 GOOGLE_DRIVE_SCOPE = "https://www.googleapis.com/auth/drive"
 GOOGLE_SHEET_URL_RE = re.compile(r"https://docs\.google\.com/spreadsheets/d/([a-zA-Z0-9-_]+)")
+GOOGLE_SHEET_CELL_SAFE_MAX_CHARS = 49_000
+GOOGLE_SHEET_CELL_TRUNCATION_MARKER = " [TRUNCATED]"
+DEFAULT_GOOGLE_SHEET_WRITE_CHUNK_ROWS = 300
+DEFAULT_GOOGLE_SHEET_WRITE_MAX_ATTEMPTS = 4
+DEFAULT_GOOGLE_SHEET_WRITE_RETRY_BASE_SECONDS = 1.0
+DEFAULT_GOOGLE_SHEET_WRITE_MAX_DELAY_SECONDS = 8.0
 
 
 def _require_env(name: str) -> str:
@@ -119,12 +126,98 @@ def _column_index_to_letters(index: int) -> str:
     return letters
 
 
+def _trim_sheet_cell_text(value: str) -> str:
+    text = value or ""
+    if len(text) <= GOOGLE_SHEET_CELL_SAFE_MAX_CHARS:
+        return text
+
+    keep = GOOGLE_SHEET_CELL_SAFE_MAX_CHARS - len(GOOGLE_SHEET_CELL_TRUNCATION_MARKER)
+    if keep <= 0:
+        return text[:GOOGLE_SHEET_CELL_SAFE_MAX_CHARS]
+    return text[:keep] + GOOGLE_SHEET_CELL_TRUNCATION_MARKER
+
+
 def _normalize_cell_value(value: Any) -> Any:
     if value is None:
         return ""
     if isinstance(value, (int, float, bool)):
         return value
-    return str(value)
+    return _trim_sheet_cell_text(str(value))
+
+
+def _safe_positive_int_env(name: str, default: int) -> int:
+    raw = (os.getenv(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        return default
+    return value if value > 0 else default
+
+
+def _safe_positive_float_env(name: str, default: float) -> float:
+    raw = (os.getenv(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        return default
+    return value if value > 0 else default
+
+
+def _is_retryable_google_write_error(exc: HttpError) -> bool:
+    status_code = getattr(getattr(exc, "resp", None), "status", None) or getattr(exc, "status_code", None)
+    if status_code in {408, 429, 500, 502, 503, 504}:
+        return True
+
+    detail = _extract_google_http_error_message(exc).lower()
+    retryable_markers = (
+        "rate limit",
+        "quota exceeded",
+        "backend error",
+        "internal error",
+        "timed out",
+        "timeout",
+        "temporarily unavailable",
+        "try again",
+        "connection reset",
+        "connection aborted",
+    )
+    return any(marker in detail for marker in retryable_markers)
+
+
+def _execute_google_request_with_retries(*, action: str, request_factory: Callable[[], Any]) -> Any:
+    max_attempts = _safe_positive_int_env("GOOGLE_SHEET_WRITE_MAX_ATTEMPTS", DEFAULT_GOOGLE_SHEET_WRITE_MAX_ATTEMPTS)
+    retry_base_seconds = _safe_positive_float_env(
+        "GOOGLE_SHEET_WRITE_RETRY_BASE_SECONDS",
+        DEFAULT_GOOGLE_SHEET_WRITE_RETRY_BASE_SECONDS,
+    )
+    retry_max_delay_seconds = _safe_positive_float_env(
+        "GOOGLE_SHEET_WRITE_MAX_DELAY_SECONDS",
+        DEFAULT_GOOGLE_SHEET_WRITE_MAX_DELAY_SECONDS,
+    )
+
+    last_exc: Optional[HttpError] = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            return request_factory().execute()
+        except HttpError as exc:
+            last_exc = exc
+            if attempt >= max_attempts or not _is_retryable_google_write_error(exc):
+                raise
+            delay = min(retry_max_delay_seconds, retry_base_seconds * (2 ** (attempt - 1)))
+            print(
+                f"[warn] retrying Google API call for {action} "
+                f"(attempt {attempt}/{max_attempts}, sleep {delay:.1f}s): "
+                f"{_extract_google_http_error_message(exc)}"
+            )
+            time.sleep(delay)
+
+    if last_exc:
+        raise last_exc
+    raise RuntimeError(f"Google API retry wrapper failed without an exception while trying to {action}.")
 
 
 def _get_spreadsheet_metadata(sheets: Any, spreadsheet_id: str) -> Dict[str, Any]:
@@ -233,16 +326,9 @@ def _ensure_worksheet_title(
 
 def _to_sheet_values(df: pd.DataFrame) -> List[List[Any]]:
     frame = df.astype(object).where(pd.notna(df), "")
-    rows: List[List[Any]] = [list(map(str, frame.columns.tolist()))]
+    rows: List[List[Any]] = [[_trim_sheet_cell_text(str(col)) for col in frame.columns.tolist()]]
     for row in frame.itertuples(index=False, name=None):
-        normalized: List[Any] = []
-        for cell in row:
-            if cell is None:
-                normalized.append("")
-            elif isinstance(cell, (int, float, bool)):
-                normalized.append(cell)
-            else:
-                normalized.append(str(cell))
+        normalized = [_normalize_cell_value(cell) for cell in row]
         rows.append(normalized)
     return rows
 
@@ -431,6 +517,95 @@ def create_google_sheet_placeholder(
     }
 
 
+def _write_values_chunked(
+    *,
+    sheets: Any,
+    spreadsheet_id: str,
+    tab_name: str,
+    values: List[List[Any]],
+) -> None:
+    escaped_tab_name = _escape_tab_name(tab_name)
+    clear_action = f"clear worksheet '{tab_name}' in spreadsheet '{spreadsheet_id}'"
+    _execute_google_request_with_retries(
+        action=clear_action,
+        request_factory=lambda: (
+            sheets.spreadsheets()
+            .values()
+            .clear(
+                spreadsheetId=spreadsheet_id,
+                range=f"'{escaped_tab_name}'",
+                body={},
+            )
+        ),
+    )
+
+    if not values:
+        return
+
+    headers = values[0]
+    if headers:
+        _execute_google_request_with_retries(
+            action=f"write header row into worksheet '{tab_name}' for spreadsheet '{spreadsheet_id}'",
+            request_factory=lambda: (
+                sheets.spreadsheets()
+                .values()
+                .update(
+                    spreadsheetId=spreadsheet_id,
+                    range=f"'{escaped_tab_name}'!A1",
+                    valueInputOption="RAW",
+                    body={"values": [headers]},
+                )
+            ),
+        )
+
+    data_rows = values[1:]
+    if not data_rows:
+        return
+
+    configured_chunk_rows = _safe_positive_int_env(
+        "GOOGLE_SHEET_WRITE_CHUNK_ROWS",
+        DEFAULT_GOOGLE_SHEET_WRITE_CHUNK_ROWS,
+    )
+    chunk_rows = max(1, configured_chunk_rows)
+    row_cursor = 0
+
+    while row_cursor < len(data_rows):
+        chunk_end = min(len(data_rows), row_cursor + chunk_rows)
+        chunk_values = data_rows[row_cursor:chunk_end]
+        start_row = row_cursor + 2
+        chunk_range = f"'{escaped_tab_name}'!A{start_row}"
+
+        try:
+            _execute_google_request_with_retries(
+                action=(
+                    f"write rows {start_row}-{start_row + len(chunk_values) - 1} "
+                    f"into worksheet '{tab_name}' for spreadsheet '{spreadsheet_id}'"
+                ),
+                request_factory=lambda chunk_range=chunk_range, chunk_values=chunk_values: (
+                    sheets.spreadsheets()
+                    .values()
+                    .update(
+                        spreadsheetId=spreadsheet_id,
+                        range=chunk_range,
+                        valueInputOption="RAW",
+                        body={"values": chunk_values},
+                    )
+                ),
+            )
+        except HttpError:
+            if chunk_rows <= 1:
+                raise
+            next_chunk = max(1, chunk_rows // 2)
+            print(
+                f"[warn] Google Sheets write chunk failed at row {start_row}; "
+                f"reducing chunk size from {chunk_rows} to {next_chunk} and retrying."
+            )
+            chunk_rows = next_chunk
+            continue
+
+        row_cursor = chunk_end
+
+
 def write_dataframe_to_google_sheet(
     *,
     spreadsheet_id: str,
@@ -458,16 +633,11 @@ def write_dataframe_to_google_sheet(
     values = _to_sheet_values(df)
     headers: List[str] = [str(h) for h in values[0]] if values else []
     try:
-        (
-            sheets.spreadsheets()
-            .values()
-            .update(
-                spreadsheetId=spreadsheet_id,
-                range=f"'{tab_name}'!A1",
-                valueInputOption="RAW",
-                body={"values": values},
-            )
-            .execute()
+        _write_values_chunked(
+            sheets=sheets,
+            spreadsheet_id=spreadsheet_id,
+            tab_name=tab_name,
+            values=values,
         )
     except HttpError as exc:
         _raise_google_http_error(f"write candidate rows into spreadsheet '{spreadsheet_id}'", exc)

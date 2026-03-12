@@ -74,6 +74,7 @@ Optional:
 - `RQ_WORKER_QUEUE_TYPE` (default `jd`; worker can consume `jd`, `reply`, or `all`)
 - `RQ_JOB_TIMEOUT` (default `7200`)
 - `RQ_WITH_SCHEDULER` (default `false`; keep disabled unless you use scheduled RQ jobs)
+- `RQ_STOP_ON_JOB_FAILURE` (default `true`; when a queued job fails, stop the worker before dequeuing the next job)
 - `SLACK_EVENT_TTL_SECONDS` (default `86400`)
 - `SLACK_EVENT_DEDUP_ENABLED` (default `true`)
 - `SLACK_EVENT_DEDUP_FAIL_OPEN` (default `true`)

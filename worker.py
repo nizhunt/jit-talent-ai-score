@@ -1,6 +1,7 @@
 import argparse
 import os
 import re
+import signal
 import shutil
 import uuid
 from typing import Any, Dict, List, Optional
@@ -451,6 +452,26 @@ def get_worker_queue_names(queue_type: str) -> List[str]:
     return [get_jd_queue_name(), get_reply_queue_name()]
 
 
+def attach_fail_fast_exception_handler(worker: Worker) -> None:
+    stop_on_failure = _is_truthy(os.getenv("RQ_STOP_ON_JOB_FAILURE"), default=True)
+    if not stop_on_failure:
+        return
+
+    def _stop_worker_after_failure(job, exc_type, exc_value, traceback):  # type: ignore[no-untyped-def]
+        job_id = getattr(job, "id", "unknown")
+        print(
+            f"[fatal] job {job_id} failed with {getattr(exc_type, '__name__', 'Exception')}: {exc_value}. "
+            "Stopping worker before dequeuing the next job."
+        )
+        try:
+            worker.request_stop(signal.SIGTERM, None)
+        except Exception as stop_exc:
+            print(f"[warn] failed to request worker stop after job failure: {stop_exc}")
+        return True
+
+    worker.push_exc_handler(_stop_worker_after_failure)
+
+
 def main() -> None:
     load_dotenv()
     args = parse_worker_args()
@@ -458,6 +479,7 @@ def main() -> None:
     conn = get_redis_connection()
     queue_names = get_worker_queue_names(args.queue_type)
     worker = Worker(queue_names, connection=conn)
+    attach_fail_fast_exception_handler(worker)
     with_scheduler = args.with_scheduler or _is_truthy(os.getenv("RQ_WITH_SCHEDULER"), default=False)
     worker.work(with_scheduler=with_scheduler, burst=args.burst)
 

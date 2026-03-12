@@ -123,10 +123,13 @@ SCORE_RESPONSE_SCHEMA = {
                 "score": {
                     "type": "integer",
                     "description": "Suitability score from 0 to 10",
+                    "minimum": 0,
+                    "maximum": 10,
                 },
                 "reason": {
                     "type": "string",
                     "description": "Brief reasoning for the score",
+                    "minLength": 1,
                 },
                 "email": {
                     "type": "string",
@@ -287,7 +290,10 @@ def write_text_file(path: str, content: str) -> None:
 def read_pipeline_csv(path: str) -> pd.DataFrame:
     # Avoid chunked dtype inference for wide work-history CSVs; Railway logs these as
     # mixed-type warnings because sparse columns can contain both empty and scalar values.
-    return pd.read_csv(path, low_memory=False)
+    try:
+        return pd.read_csv(path, low_memory=False)
+    except pd.errors.EmptyDataError:
+        return pd.DataFrame()
 
 
 def cleanup_legacy_exa_query_logs() -> int:
@@ -1066,9 +1072,33 @@ def combine_batch_csvs(batch_csv_paths: List[str], output_csv: str) -> int:
         pd.DataFrame().to_csv(output_csv, index=False)
         return 0
 
+    discovered_columns: List[str] = []
+    seen_columns: Set[str] = set()
+    for path in batch_csv_paths:
+        try:
+            header_df = pd.read_csv(path, low_memory=False, nrows=0)
+        except pd.errors.EmptyDataError:
+            header_df = pd.DataFrame()
+        for col in header_df.columns:
+            if col not in seen_columns:
+                seen_columns.add(col)
+                discovered_columns.append(str(col))
+        del header_df
+        gc.collect()
+
+    ordered_first = [col for col in BASE_CSV_FIRST_COLUMNS if col in seen_columns]
+    remaining = [col for col in discovered_columns if col not in ordered_first]
+    merged_columns = ordered_first + remaining
+
     total_rows = 0
     for batch_idx, path in enumerate(batch_csv_paths):
-        batch_df = reorder_columns(read_pipeline_csv(path), BASE_CSV_FIRST_COLUMNS)
+        batch_df = read_pipeline_csv(path)
+        if merged_columns:
+            missing_cols = [col for col in merged_columns if col not in batch_df.columns]
+            for col in missing_cols:
+                batch_df[col] = ""
+            batch_df = batch_df[merged_columns]
+
         total_rows += len(batch_df)
         batch_df.to_csv(output_csv, index=False, mode="w" if batch_idx == 0 else "a", header=(batch_idx == 0))
         del batch_df
@@ -1233,10 +1263,33 @@ def get_ai_score(
         )
         raw = (response.choices[0].message.content or "").strip()
         data = json.loads(raw)
-        return int(data["score"]), data["reason"], data.get("email", ""), extract_usage_tokens(response)
+        score, reason, email = normalize_score_response(data)
+        return score, reason, email, extract_usage_tokens(response)
     except Exception as exc:
         print(f"  [warn] scoring error: {exc}")
         return "Error", str(exc), "", {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+
+
+def normalize_score_response(payload: Dict[str, Any]) -> Tuple[int, str, str]:
+    raw_score = payload.get("score")
+    try:
+        score = int(raw_score)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"Invalid score value in model output: {raw_score!r}") from exc
+
+    clamped_score = max(0, min(10, score))
+    if clamped_score != score:
+        print(f"[warn] model returned out-of-range score={score}; clamped to {clamped_score}")
+
+    reason = normalize_whitespace(payload.get("reason"))
+    if not reason:
+        reason = "Insufficient evidence in candidate profile to assess fit confidently."
+
+    email = str(payload.get("email") or "").strip()
+    if clamped_score <= 3:
+        email = ""
+
+    return clamped_score, reason, email
 
 
 def extract_usage_tokens(response: Any) -> Dict[str, int]:
