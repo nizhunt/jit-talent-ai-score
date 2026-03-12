@@ -99,7 +99,7 @@ Provide three fields: **Score**, **Reasoning**, and **Email**.
 Use the reasoning and JD to write the personalization snippet.
 
 - **Score 4-10:** output 2 plain-text sentences separated by exactly 1 blank line.
-  Sentence 1: a short candidate fit sentence starting with "You/Your" followed with why he's fit for {{role}} at/in {{location}} and {{work_mode eg remote/inoffice/hybrid}} if present. eg. "Your 12+ years of hands‑on software engineering experience makes you a potential fit for a Head of Engineering an in-office role in the Greater Toronto Area."
+  Sentence 1: a short candidate fit sentence starting with "I came across your profile and think you could be a great match for {{role}} at/in {{location}} and {{work_mode eg remote/inoffice/hybrid}} if present. eg. "I came across your profile and think you could be a great match for a Head of Engineering an in-office role in the Greater Toronto Area."
   Sentence 2: one very short sentence describing what the role does using JD responsibilities. 
   Do not add labels, bullets, numbering, or markdown.
 - **Score 0-3:** leave `Email` empty.
