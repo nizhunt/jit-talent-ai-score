@@ -234,10 +234,24 @@ def _slack_headers(slack_token: str) -> Dict[str, str]:
     return {"Authorization": f"Bearer {slack_token}"}
 
 
-def _slack_post_message(slack_token: str, channel_id: str, text: str, thread_ts: Optional[str] = None) -> Dict[str, Any]:
+def _slack_post_message(
+    slack_token: str,
+    channel_id: str,
+    text: str,
+    thread_ts: Optional[str] = None,
+    blocks: Optional[List[Dict[str, Any]]] = None,
+    unfurl_links: Optional[bool] = None,
+    unfurl_media: Optional[bool] = None,
+) -> Dict[str, Any]:
     payload: Dict[str, Any] = {"channel": channel_id, "text": text}
     if thread_ts:
         payload["thread_ts"] = thread_ts
+    if blocks:
+        payload["blocks"] = blocks
+    if unfurl_links is not None:
+        payload["unfurl_links"] = unfurl_links
+    if unfurl_media is not None:
+        payload["unfurl_media"] = unfurl_media
     response = requests.post(
         SLACK_POST_MESSAGE_URL,
         headers={
@@ -254,12 +268,23 @@ def _slack_post_message(slack_token: str, channel_id: str, text: str, thread_ts:
     return body
 
 
-def post_thread_reply_update(slack_token: str, channel_id: str, thread_ts: str, text: str) -> Dict[str, Any]:
+def post_thread_reply_update(
+    slack_token: str,
+    channel_id: str,
+    thread_ts: str,
+    text: str,
+    blocks: Optional[List[Dict[str, Any]]] = None,
+    unfurl_links: Optional[bool] = None,
+    unfurl_media: Optional[bool] = None,
+) -> Dict[str, Any]:
     return _slack_post_message(
         slack_token=slack_token,
         channel_id=channel_id,
         thread_ts=thread_ts,
         text=text,
+        blocks=blocks,
+        unfurl_links=unfurl_links,
+        unfurl_media=unfurl_media,
     )
 
 

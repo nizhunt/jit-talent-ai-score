@@ -42,6 +42,87 @@ def _jd_prefix(jd_name: Optional[str]) -> str:
     return f"[{name}] "
 
 
+def _slack_escape(text: str) -> str:
+    return (
+        (text or "")
+        .replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+    )
+
+
+def _build_enrichment_summary_blocks(
+    *,
+    result: Dict[str, Any],
+    threshold: float,
+    source_name: str,
+    source_url: str,
+    campaign_name: str,
+    campaign_analytics_url: str,
+    lead_skipped: List[str],
+    lead_errors: List[str],
+    dashboard_warning: str,
+) -> List[Dict[str, Any]]:
+    has_campaign = bool(result.get("campaign_id"))
+    title = "Thread enrichment complete." if has_campaign else "Thread enrichment completed with no campaign created."
+    blocks: List[Dict[str, Any]] = [
+        {"type": "section", "text": {"type": "mrkdwn", "text": f"*{_slack_escape(title)}*"}},
+        {
+            "type": "section",
+            "fields": [
+                {"type": "mrkdwn", "text": f"*Source*\n{_slack_escape(source_name or 'N/A')}"},
+                {"type": "mrkdwn", "text": f"*JD Name*\n{_slack_escape(str(result.get('jd_name') or 'N/A'))}"},
+                {"type": "mrkdwn", "text": f"*Threshold*\n{threshold:g}"},
+                {
+                    "type": "mrkdwn",
+                    "text": f"*Rows with score+LinkedIn parsed*\n{int(result.get('rows_with_score_and_linkedin') or 0)}",
+                },
+                {
+                    "type": "mrkdwn",
+                    "text": f"*Candidates meeting threshold*\n{int(result.get('rows_meeting_threshold') or 0)}",
+                },
+                {"type": "mrkdwn", "text": f"*SaleSQL emails*\n{int(result.get('salesql_emails_found') or 0)}"},
+                {"type": "mrkdwn", "text": f"*Reoon passed*\n{int(result.get('reoon_passed') or 0)}"},
+                {"type": "mrkdwn", "text": f"*BounceBan deliverable*\n{int(result.get('bounceban_deliverable') or 0)}"},
+            ],
+        },
+    ]
+
+    if source_url:
+        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": f"*Source URL*\n<{source_url}|Open source sheet>"}})
+
+    if has_campaign:
+        blocks.append(
+            {
+                "type": "section",
+                "fields": [
+                    {"type": "mrkdwn", "text": f"*Instantly campaign name*\n{_slack_escape(campaign_name or 'N/A')}"},
+                    {"type": "mrkdwn", "text": f"*Leads added*\n{int(result.get('leads_added') or 0)}"},
+                    {"type": "mrkdwn", "text": f"*Leads skipped*\n{len(lead_skipped)}"},
+                    {"type": "mrkdwn", "text": f"*Lead add errors*\n{len(lead_errors)}"},
+                ],
+            }
+        )
+        blocks.append(
+            {
+                "type": "section",
+                "text": {"type": "mrkdwn", "text": f"*Instantly campaign*\n<{campaign_analytics_url}|Open campaign analytics>"},
+            }
+        )
+
+    if lead_skipped:
+        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": f"*Skip sample*\n`{_slack_escape(lead_skipped[0])}`"}})
+
+    note = str(result.get("note") or "").strip()
+    if note:
+        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": f"*Note*\n{_slack_escape(note)}"}})
+
+    if dashboard_warning:
+        blocks.append({"type": "context", "elements": [{"type": "mrkdwn", "text": f"*Dashboard*: {_slack_escape(dashboard_warning)}"}]})
+
+    return blocks
+
+
 def build_pipeline_args(
     channel_id: str,
     jd_name: Optional[str] = None,
@@ -279,6 +360,7 @@ def process_thread_reply_enrichment_job(
     lead_errors = result.get("lead_errors") or []
     campaign_id = result.get("campaign_id")
     campaign_name = result.get("campaign_name")
+    campaign_analytics_url = ""
     source_name = result.get("source_name") or "N/A"
     source_url = result.get("source_url") or ""
     source_url_line = f"Source URL: {source_url}\n" if source_url else ""
@@ -321,11 +403,25 @@ def process_thread_reply_enrichment_job(
             summary_text = f"{summary_text}\nNote: {note}"
     if dashboard_warning:
         summary_text = f"{summary_text}\nDashboard: {dashboard_warning}"
+    summary_blocks = _build_enrichment_summary_blocks(
+        result=result,
+        threshold=threshold,
+        source_name=str(source_name),
+        source_url=str(source_url),
+        campaign_name=str(campaign_name or ""),
+        campaign_analytics_url=campaign_analytics_url,
+        lead_skipped=lead_skipped,
+        lead_errors=lead_errors,
+        dashboard_warning=dashboard_warning,
+    )
     post_thread_reply_update(
         slack_token=slack_token,
         channel_id=channel_id,
         thread_ts=thread_ts,
         text=summary_text,
+        blocks=summary_blocks,
+        unfurl_links=False,
+        unfurl_media=False,
     )
     return {"ok": True, "event_id": event_id, "result": result}
 

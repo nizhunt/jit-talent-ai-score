@@ -73,6 +73,7 @@ SHEET_COLUMN_LABEL_OVERRIDES = {
     "id": "ID",
 }
 MAX_WORK_HISTORY_COLUMNS = 15
+MAX_CANDIDATE_TEXT_CHARS = 30_000
 SHEET_COLUMNS_TO_OMIT = {
     "id",
     "entity_id",
@@ -639,6 +640,13 @@ def normalize_whitespace(value: Any) -> str:
     return re.sub(r"\\s+", " ", str(value)).strip()
 
 
+def truncate_candidate_text(text: str, max_chars: int = MAX_CANDIDATE_TEXT_CHARS) -> str:
+    """Limit candidate profile text size sent to the scorer model."""
+    if len(text) <= max_chars:
+        return text
+    return text[:max_chars]
+
+
 def normalize_url(value: Any) -> str:
     url = normalize_whitespace(value)
     if not url:
@@ -1167,7 +1175,8 @@ def get_ai_score(
     if not candidate_text or pd.isna(candidate_text):
         return 0, "No candidate data available", "", {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
 
-    scorer_prompt = scorer_prompt_template.replace("[PASTE LINKEDIN DATA]", str(candidate_text))
+    capped_candidate_text = truncate_candidate_text(str(candidate_text))
+    scorer_prompt = scorer_prompt_template.replace("[PASTE LINKEDIN DATA]", capped_candidate_text)
     scorer_prompt = scorer_prompt.replace("[PASTE JD TEXT]", jd_text)
 
     try:
@@ -1432,7 +1441,57 @@ def build_score_counts_by_score(scored_df: pd.DataFrame) -> Dict[int, int]:
     return counts
 
 
-def build_linkedin_samples_by_score_lines(scored_df: pd.DataFrame, per_score_limit: int = 10) -> List[str]:
+def _pick_first_nonempty(row: pd.Series, keys: List[str]) -> str:
+    for key in keys:
+        if key not in row:
+            continue
+        value = normalize_whitespace(row.get(key))
+        if value:
+            return value
+    return ""
+
+
+def _candidate_name_from_linkedin_url(linkedin_url: str) -> str:
+    parsed = urlsplit(linkedin_url)
+    path_parts = [part for part in (parsed.path or "").strip("/").split("/") if part]
+    slug = ""
+    if len(path_parts) >= 2 and path_parts[0].lower() in {"in", "pub"}:
+        slug = path_parts[1]
+    elif path_parts:
+        slug = path_parts[0]
+
+    slug = re.sub(r"[-_]+", " ", slug).strip()
+    if not slug:
+        return "LinkedIn profile"
+    # Preserve all-caps acronyms while normalizing common slug casing.
+    words = [word if word.isupper() else word.capitalize() for word in slug.split()]
+    return " ".join(words) or "LinkedIn profile"
+
+
+def _candidate_display_name_from_row(row: pd.Series, linkedin_url: str) -> str:
+    full_name = _pick_first_nonempty(
+        row,
+        ["name", "Name", "full_name", "Full Name", "candidate_name", "Candidate Name"],
+    )
+    if full_name:
+        return full_name
+
+    first_name = _pick_first_nonempty(row, ["first_name", "First Name", "firstname", "FirstName"])
+    last_name = _pick_first_nonempty(row, ["last_name", "Last Name", "lastname", "LastName"])
+    combined = normalize_whitespace(f"{first_name} {last_name}")
+    if combined:
+        return combined
+    if first_name:
+        return first_name
+
+    return _candidate_name_from_linkedin_url(linkedin_url)
+
+
+def collect_linkedin_samples_by_score(
+    scored_df: pd.DataFrame,
+    per_score_limit: int = 10,
+    score_targets: Optional[List[int]] = None,
+) -> List[Tuple[int, List[Dict[str, str]]]]:
     if "ai-score" not in scored_df.columns or per_score_limit <= 0:
         return []
 
@@ -1447,17 +1506,16 @@ def build_linkedin_samples_by_score_lines(scored_df: pd.DataFrame, per_score_lim
     if numeric_scores.dropna().empty:
         return []
 
-    score_targets = [9, 8, 7, 6, 5, 0]
+    targets = score_targets or [9, 8, 7, 6, 5, 0]
     seen_linkedin: Set[str] = set()
-    lines: List[str] = ["LinkedIn samples by score:"]
+    groups: List[Tuple[int, List[Dict[str, str]]]] = []
 
-    for score_target in score_targets:
-        lines.append(f"  Score {score_target}:")
-        selected_links: List[str] = []
+    for score_target in targets:
+        selected_entries: List[Dict[str, str]] = []
 
-        matching_rows = scored_df.loc[numeric_scores == float(score_target), linkedin_col]
-        for raw_link in matching_rows:
-            link = normalize_whitespace(raw_link)
+        matching_df = scored_df.loc[numeric_scores == float(score_target)]
+        for _, row in matching_df.iterrows():
+            link = normalize_whitespace(row.get(linkedin_col))
             if "linkedin.com" not in link.lower():
                 continue
 
@@ -1470,17 +1528,223 @@ def build_linkedin_samples_by_score_lines(scored_df: pd.DataFrame, per_score_lim
                 continue
 
             seen_linkedin.add(dedup_key)
-            selected_links.append(link)
-            if len(selected_links) >= per_score_limit:
+            selected_entries.append(
+                {
+                    "name": _candidate_display_name_from_row(row, link),
+                    "url": link,
+                }
+            )
+            if len(selected_entries) >= per_score_limit:
                 break
 
-        for idx, link in enumerate(selected_links, start=1):
-            lines.append(f"    {idx}. {link}")
+        groups.append((score_target, selected_entries))
 
-        if not selected_links:
-            lines.append("    (none found)")
+    return groups
 
+
+def build_linkedin_samples_by_score_lines(scored_df: pd.DataFrame, per_score_limit: int = 10) -> List[str]:
+    groups = collect_linkedin_samples_by_score(scored_df=scored_df, per_score_limit=per_score_limit)
+    if not groups:
+        return []
+
+    lines: List[str] = ["LinkedIn samples by score:"]
+    for score_target, entries in groups:
+        lines.append(f"  Score {score_target}:")
+        if entries:
+            for idx, entry in enumerate(entries, start=1):
+                lines.append(f"    {idx}. {entry.get('name') or 'Candidate'} — {entry.get('url') or ''}")
+            continue
+        lines.append("    (none found)")
     return lines
+
+
+def _slack_escape(text: str) -> str:
+    return (
+        (text or "")
+        .replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+    )
+
+
+def _chunk_markdown_lines(lines: List[str], max_chars: int = 2800) -> List[str]:
+    chunks: List[str] = []
+    current: List[str] = []
+    current_len = 0
+
+    for line in lines:
+        line_len = len(line) + (1 if current else 0)
+        if current and current_len + line_len > max_chars:
+            chunks.append("\n".join(current))
+            current = [line]
+            current_len = len(line)
+            continue
+        current.append(line)
+        current_len += line_len
+
+    if current:
+        chunks.append("\n".join(current))
+    return chunks
+
+
+def _linkedin_display_label(url: str) -> str:
+    parsed = urlsplit(url)
+    if not parsed.netloc:
+        return "linkedin profile"
+    path = (parsed.path or "/").rstrip("/") or "/"
+    return f"{parsed.netloc}{path}"
+
+
+def _format_linkedin_sample_entry(entry_index: int, entry: Dict[str, str]) -> str:
+    name = _slack_escape(entry.get("name") or "Candidate")
+    url = normalize_whitespace(entry.get("url"))
+    if url:
+        return f"{entry_index}. <{url}|{name}>"
+    return f"{entry_index}. {name}"
+
+
+def _slack_table_raw_text_cell(text: str) -> Dict[str, str]:
+    return {
+        "type": "raw_text",
+        "text": normalize_whitespace(text),
+    }
+
+
+def _slack_table_link_cell(label: str, url: str) -> Dict[str, Any]:
+    return {
+        "type": "rich_text",
+        "elements": [
+            {
+                "type": "rich_text_section",
+                "elements": [
+                    {
+                        "type": "link",
+                        "url": url,
+                        "text": normalize_whitespace(label) or "LinkedIn profile",
+                    }
+                ],
+            }
+        ],
+    }
+
+
+def build_linkedin_samples_table_attachments(
+    linkedin_sample_groups: List[Tuple[int, List[Dict[str, str]]]],
+) -> List[Dict[str, Any]]:
+    rows: List[List[Dict[str, Any]]] = [
+        [
+            _slack_table_raw_text_cell("Name"),
+            _slack_table_raw_text_cell("LinkedIn"),
+        ]
+    ]
+    for score_target, entries in linkedin_sample_groups:
+        rows.append(
+            [
+                _slack_table_raw_text_cell(f"Score {score_target}"),
+                _slack_table_raw_text_cell(""),
+            ]
+        )
+        if not entries:
+            rows.append([_slack_table_raw_text_cell("(none found)"), _slack_table_raw_text_cell("")])
+            continue
+
+        for entry in entries:
+            name = entry.get("name") or "Candidate"
+            url = normalize_whitespace(entry.get("url"))
+            if not url:
+                rows.append(
+                    [
+                        _slack_table_raw_text_cell(name),
+                        _slack_table_raw_text_cell(""),
+                    ]
+                )
+                continue
+            rows.append(
+                [
+                    _slack_table_raw_text_cell(name),
+                    _slack_table_link_cell(_linkedin_display_label(url), url),
+                ]
+            )
+
+    table_block = {
+        "type": "table",
+        "column_settings": [{"align": "left"}, {"align": "left", "is_wrapped": True}],
+        "rows": rows[:100],
+    }
+    return [{"blocks": [table_block]}]
+
+
+def build_scored_result_blocks(
+    *,
+    result_prefix: str,
+    jd_name: str,
+    google_sheet_url: str,
+    rows_scored: int,
+    qualified_finds: int,
+    cost_per_find_line: str,
+    elapsed_text: str,
+    score_tally_lines: List[str],
+    linkedin_sample_groups: List[Tuple[int, List[Dict[str, str]]]],
+) -> List[Dict[str, Any]]:
+    title_text = _slack_escape(normalize_whitespace(result_prefix) or "AI-scored candidates sheet for this JD")
+    jd_display = _slack_escape(normalize_whitespace(jd_name) or "N/A")
+    cost_display = _slack_escape(cost_per_find_line.replace("Est. cost/find (score >= 5):", "").strip())
+
+    blocks: List[Dict[str, Any]] = [
+        {"type": "section", "text": {"type": "mrkdwn", "text": f"*{title_text}*"}},
+        {
+            "type": "section",
+            "fields": [
+                {"type": "mrkdwn", "text": f"*JD Name*\n{jd_display}"},
+                {"type": "mrkdwn", "text": f"*Scored*\n{rows_scored}"},
+                {"type": "mrkdwn", "text": f"*Finds (score >= 5)*\n{qualified_finds}"},
+                {"type": "mrkdwn", "text": f"*Total time*\n{_slack_escape(elapsed_text)}"},
+                {"type": "mrkdwn", "text": f"*Est. cost/find (score >= 5)*\n{cost_display}"},
+            ],
+        },
+        {
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": f"*Google Sheet*\n<{google_sheet_url}|Open scored candidates sheet>"},
+        },
+        {"type": "divider"},
+    ]
+
+    tally_lines = score_tally_lines or ["  (no scores)"]
+    tally_text = "\n".join(tally_lines)
+    blocks.append(
+        {
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": f"*Score Tally*\n```{_slack_escape(tally_text)}```"},
+        }
+    )
+    blocks.append({"type": "divider"})
+    blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": "*LinkedIn samples by score*"}})
+
+    if not linkedin_sample_groups:
+        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": "unavailable"}})
+        return blocks
+
+    for score_target, entries in linkedin_sample_groups:
+        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": f"*Score {score_target}*"}})
+        if not entries:
+            blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": "(none found)"}})
+            continue
+
+        split_idx = (len(entries) + 1) // 2
+        left_lines = [
+            _format_linkedin_sample_entry(entry_index=idx, entry=entry)
+            for idx, entry in enumerate(entries[:split_idx], start=1)
+        ]
+        right_lines = [
+            _format_linkedin_sample_entry(entry_index=idx, entry=entry)
+            for idx, entry in enumerate(entries[split_idx:], start=split_idx + 1)
+        ]
+        fields: List[Dict[str, str]] = [{"type": "mrkdwn", "text": "\n".join(left_lines)}]
+        if right_lines:
+            fields.append({"type": "mrkdwn", "text": "\n".join(right_lines)})
+        blocks.append({"type": "section", "fields": fields})
+
+    return blocks
 
 
 def count_qualified_finds(scored_df: pd.DataFrame, minimum_score: float = 5.0) -> int:
@@ -1505,6 +1769,10 @@ def post_slack_message(
     slack_token: str,
     channel_id: str,
     text: str,
+    blocks: Optional[List[Dict[str, Any]]] = None,
+    attachments: Optional[List[Dict[str, Any]]] = None,
+    unfurl_links: Optional[bool] = None,
+    unfurl_media: Optional[bool] = None,
 ) -> Dict[str, Any]:
     headers = {
         "Authorization": f"Bearer {slack_token}",
@@ -1514,6 +1782,14 @@ def post_slack_message(
         "channel": channel_id,
         "text": text,
     }
+    if blocks:
+        payload["blocks"] = blocks
+    if attachments:
+        payload["attachments"] = attachments
+    if unfurl_links is not None:
+        payload["unfurl_links"] = unfurl_links
+    if unfurl_media is not None:
+        payload["unfurl_media"] = unfurl_media
     response = requests.post(
         SLACK_POST_MESSAGE_URL,
         headers=headers,
@@ -1793,6 +2069,7 @@ def run_pipeline_from_jd_text(
     # Build score tally before freeing the DataFrame.
     score_tally_lines = build_score_tally_lines(scored_df)
     score_counts_by_score = build_score_counts_by_score(scored_df)
+    linkedin_sample_groups = collect_linkedin_samples_by_score(scored_df, per_score_limit=10)
     linkedin_sample_lines = build_linkedin_samples_by_score_lines(scored_df, per_score_limit=10)
 
     del scored_df  # Free before Slack upload
@@ -1828,10 +2105,24 @@ def run_pipeline_from_jd_text(
         f"Score Tally:\n{tally_block}\n\n"
         f"{'\n'.join(linkedin_sample_lines) if linkedin_sample_lines else 'LinkedIn samples by score: unavailable'}"
     )
+    result_message_blocks = build_scored_result_blocks(
+        result_prefix=result_prefix,
+        jd_name=jd_name,
+        google_sheet_url=google_sheet_url,
+        rows_scored=rows_scored,
+        qualified_finds=qualified_finds,
+        cost_per_find_line=cost_per_find_line,
+        elapsed_text=format_eta_seconds(elapsed),
+        score_tally_lines=score_tally_lines,
+        linkedin_sample_groups=linkedin_sample_groups,
+    )
     post_slack_message(
         slack_token=slack_token,
         channel_id=args.channel_id,
         text=result_message_text,
+        blocks=result_message_blocks,
+        unfurl_links=False,
+        unfurl_media=False,
     )
 
     maybe_stop(args.stop_after, "post")
