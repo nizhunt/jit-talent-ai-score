@@ -272,3 +272,4 @@ Persistence:
 - Pipeline outputs are written under `/tmp` in worker runs and cleaned up after each job.
 - Step updates are posted to Slack at each stage completion.
 - The 15 generated Exa prompts are uploaded to Slack as a `.txt` file per run.
+---
