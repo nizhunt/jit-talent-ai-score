@@ -714,10 +714,11 @@ def _add_lead_to_instantly_campaign(
     personalization_body = _clean_personalization_snippet(generated_email)
     personalization_raw = personalization_body if personalization_body else (f"LinkedIn: {linkedin_url}" if linkedin_url else "")
     personalization = _format_instantly_html_text(personalization_raw)
+    skip_if_in_workspace = _is_truthy(os.getenv("INSTANTLY_SKIP_IF_IN_WORKSPACE"), default=True)
     payload = {
         "email": lead["email"],
         "campaign": campaign_id,
-        "skip_if_in_workspace": True,
+        "skip_if_in_workspace": skip_if_in_workspace,
         "first_name": lead.get("first_name", ""),
         "last_name": lead.get("last_name", ""),
         "company_name": _clean_company_name(lead.get("company_name", "")),
@@ -732,6 +733,29 @@ def _add_lead_to_instantly_campaign(
     )
     response.raise_for_status()
     return response.json()
+
+
+def _classify_instantly_lead_add_result(campaign_id: str, response_body: Dict[str, Any]) -> Dict[str, str]:
+    target_campaign = str(campaign_id or "").strip()
+    response_campaign = str(response_body.get("campaign") or "").strip()
+    lead_id = str(response_body.get("id") or "").strip()
+
+    if response_campaign and response_campaign != target_campaign:
+        return {
+            "status": "skipped",
+            "detail": (
+                "already existed in Instantly workspace and remained attached to "
+                f"campaign {response_campaign}"
+            ),
+        }
+
+    if not lead_id:
+        message = str(response_body.get("message") or "").strip()
+        if not message:
+            message = "Instantly response did not include lead id"
+        return {"status": "error", "detail": message}
+
+    return {"status": "added", "detail": ""}
 
 
 def _dedupe_preserve_order(items: List[str]) -> List[str]:
@@ -784,6 +808,7 @@ def run_thread_reply_enrichment_pipeline(
             "campaign_id": None,
             "campaign_name": None,
             "leads_added": 0,
+            "lead_skipped": [],
             "lead_errors": [],
             **_result_source_fields(),
         }
@@ -810,6 +835,7 @@ def run_thread_reply_enrichment_pipeline(
             "campaign_id": None,
             "campaign_name": None,
             "leads_added": 0,
+            "lead_skipped": [],
             "lead_errors": [],
             **_result_source_fields(),
         }
@@ -833,6 +859,7 @@ def run_thread_reply_enrichment_pipeline(
             "campaign_id": None,
             "campaign_name": None,
             "leads_added": 0,
+            "lead_skipped": [],
             "lead_errors": [],
             **_result_source_fields(),
         }
@@ -860,6 +887,7 @@ def run_thread_reply_enrichment_pipeline(
             "campaign_id": None,
             "campaign_name": None,
             "leads_added": 0,
+            "lead_skipped": [],
             "lead_errors": [],
             "note": message,
             **_result_source_fields(),
@@ -878,6 +906,7 @@ def run_thread_reply_enrichment_pipeline(
             "campaign_id": None,
             "campaign_name": None,
             "leads_added": 0,
+            "lead_skipped": [],
             "lead_errors": [],
             **_result_source_fields(),
         }
@@ -902,6 +931,7 @@ def run_thread_reply_enrichment_pipeline(
             "campaign_id": None,
             "campaign_name": None,
             "leads_added": 0,
+            "lead_skipped": [],
             "lead_errors": [],
             **_result_source_fields(),
         }
@@ -915,18 +945,29 @@ def run_thread_reply_enrichment_pipeline(
     campaign_id = campaign["id"]
     campaign_name = campaign["name"]
 
+    lead_skipped: List[str] = []
     lead_errors: List[str] = []
     added_count = 0
     fail_fast = _is_truthy(os.getenv("INSTANTLY_FAIL_FAST"), default=False)
     for email in deliverable:
         lead_meta = metadata_by_email.get(email) or {"email": email}
         try:
-            _add_lead_to_instantly_campaign(
+            add_response = _add_lead_to_instantly_campaign(
                 instantly_api_key=instantly_api_key,
                 campaign_id=campaign_id,
                 lead=lead_meta,
             )
-            added_count += 1
+            outcome = _classify_instantly_lead_add_result(campaign_id=campaign_id, response_body=add_response)
+            if outcome["status"] == "added":
+                added_count += 1
+                continue
+            if outcome["status"] == "skipped":
+                lead_skipped.append(f"{email}: {outcome['detail']}")
+                continue
+            if fail_fast:
+                raise RuntimeError(outcome["detail"])
+            lead_errors.append(f"{email}: {outcome['detail']}")
+            continue
         except Exception as exc:
             lead_errors.append(f"{email}: {exc}")
             if fail_fast:
@@ -943,6 +984,7 @@ def run_thread_reply_enrichment_pipeline(
         "campaign_id": campaign_id,
         "campaign_name": campaign_name,
         "leads_added": added_count,
+        "lead_skipped": lead_skipped,
         "lead_errors": lead_errors,
         **_result_source_fields(),
     }

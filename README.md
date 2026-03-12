@@ -92,6 +92,7 @@ Optional:
 - `BOUNCEBAN_MAX_WAIT_SECONDS` (default `600`)
 - `BOUNCEBAN_POLL_INTERVAL_SECONDS` (default `15`)
 - `INSTANTLY_FAIL_FAST` (default `false`; abort immediately on first Instantly lead add error)
+- `INSTANTLY_SKIP_IF_IN_WORKSPACE` (default `true`; if true, Instantly may skip emails that already exist in the workspace)
 - `THREAD_RESULT_STRICT` (default `true`; only allow thread-reply enrichment when thread root text matches result message prefix)
 - `RESULT_MESSAGE_PREFIX` (default `AI-scored candidates sheet for this JD`)
 - `GOOGLE_WORKSPACE_DOMAIN_ROLE` (default `writer`; set `reader` or `commenter` if needed)
@@ -102,6 +103,7 @@ Optional:
 ## Dashboard Logging (Optional)
 
 Set `DASHBOARD_GOOGLE_SHEET_URL` to enable automatic dashboard rows keyed by `Scored Candidates Sheet URL`.
+By default rows are written into worksheet `info-log` unless `DASHBOARD_WORKSHEET_NAME` is set.
 
 Column names used:
 - `JD Campaign Name`
@@ -115,6 +117,7 @@ Column names used:
 - `Emails Found via SaleSQL`
 - `Emails Passed Reoon`
 - `Emails Passed BounceBan`
+- `pre-exist in instantly`
 - `Net Leads Enrolled to Instantly`
 - `Instantly Campaign Name`
 - `Instantly Campaign URL`

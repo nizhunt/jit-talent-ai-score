@@ -20,6 +20,7 @@ COL_CANDIDATES_ENTERED_ENRICHMENT = "Candidates Entered Enrichment"
 COL_EMAILS_FOUND_SALESQL = "Emails Found via SaleSQL"
 COL_EMAILS_PASSED_REOON = "Emails Passed Reoon"
 COL_EMAILS_PASSED_BOUNCEBAN = "Emails Passed BounceBan"
+COL_PRE_EXIST_IN_INSTANTLY = "pre-exist in instantly"
 COL_NET_LEADS_ENROLLED_INSTANTLY = "Net Leads Enrolled to Instantly"
 COL_INSTANTLY_CAMPAIGN_NAME = "Instantly Campaign Name"
 COL_INSTANTLY_CAMPAIGN_URL = "Instantly Campaign URL"
@@ -40,6 +41,7 @@ DASHBOARD_COLUMNS = [
     COL_EMAILS_FOUND_SALESQL,
     COL_EMAILS_PASSED_REOON,
     COL_EMAILS_PASSED_BOUNCEBAN,
+    COL_PRE_EXIST_IN_INSTANTLY,
     COL_NET_LEADS_ENROLLED_INSTANTLY,
     COL_INSTANTLY_CAMPAIGN_NAME,
     COL_INSTANTLY_CAMPAIGN_URL,
@@ -145,6 +147,7 @@ def log_enrichment_dashboard_row(
     emails_found_salesql: int,
     emails_passed_reoon: int,
     emails_passed_bounceban: int,
+    pre_exist_in_instantly: int,
     net_leads_enrolled_instantly: int,
     instantly_campaign_name: str = "",
     instantly_campaign_id: str = "",
@@ -164,6 +167,7 @@ def log_enrichment_dashboard_row(
     row[COL_EMAILS_FOUND_SALESQL] = _safe_int(emails_found_salesql)
     row[COL_EMAILS_PASSED_REOON] = _safe_int(emails_passed_reoon)
     row[COL_EMAILS_PASSED_BOUNCEBAN] = _safe_int(emails_passed_bounceban)
+    row[COL_PRE_EXIST_IN_INSTANTLY] = _safe_int(pre_exist_in_instantly)
     row[COL_NET_LEADS_ENROLLED_INSTANTLY] = _safe_int(net_leads_enrolled_instantly)
     row[COL_INSTANTLY_CAMPAIGN_NAME] = (instantly_campaign_name or "").strip()
     row[COL_INSTANTLY_CAMPAIGN_URL] = (instantly_campaign_url or "").strip() or _build_instantly_campaign_url(

@@ -253,6 +253,8 @@ def process_thread_reply_enrichment_job(
         )
         return {"ok": True, "event_id": event_id, "result": result}
 
+    lead_skipped = result.get("lead_skipped") or []
+    dashboard_warning = ""
     try:
         log_enrichment_dashboard_row(
             jd_name=str(result.get("jd_name") or ""),
@@ -262,13 +264,17 @@ def process_thread_reply_enrichment_job(
             emails_found_salesql=int(result.get("salesql_emails_found") or 0),
             emails_passed_reoon=int(result.get("reoon_passed") or 0),
             emails_passed_bounceban=int(result.get("bounceban_deliverable") or 0),
+            pre_exist_in_instantly=len(lead_skipped),
             net_leads_enrolled_instantly=int(result.get("leads_added") or 0),
             instantly_campaign_name=str(result.get("campaign_name") or ""),
             instantly_campaign_id=str(result.get("campaign_id") or ""),
             notes=str(result.get("note") or ""),
         )
+        if not (os.getenv("DASHBOARD_GOOGLE_SHEET_URL") or "").strip():
+            dashboard_warning = "Dashboard logging skipped: DASHBOARD_GOOGLE_SHEET_URL is not set."
     except Exception as exc:
         print(f"[warn] dashboard enrichment logging failed: {exc}")
+        dashboard_warning = f"Dashboard logging failed: {exc}"
 
     lead_errors = result.get("lead_errors") or []
     campaign_id = result.get("campaign_id")
@@ -292,8 +298,11 @@ def process_thread_reply_enrichment_job(
             f"Instantly campaign name: {campaign_name or 'N/A'}\n"
             f"Instantly campaign: {campaign_analytics_url}\n"
             f"Leads added: {result.get('leads_added')}\n"
+            f"Leads skipped: {len(lead_skipped)}\n"
             f"Lead add errors: {len(lead_errors)}"
         )
+        if lead_skipped:
+            summary_text = f"{summary_text}\nSkip sample: {lead_skipped[0]}"
     else:
         summary_text = (
             f"Thread enrichment completed with no campaign created.\n"
@@ -310,6 +319,8 @@ def process_thread_reply_enrichment_job(
         note = (result.get("note") or "").strip()
         if note:
             summary_text = f"{summary_text}\nNote: {note}"
+    if dashboard_warning:
+        summary_text = f"{summary_text}\nDashboard: {dashboard_warning}"
     post_thread_reply_update(
         slack_token=slack_token,
         channel_id=channel_id,

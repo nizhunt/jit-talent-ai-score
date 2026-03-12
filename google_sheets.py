@@ -150,6 +150,47 @@ def _get_spreadsheet_metadata(sheets: Any, spreadsheet_id: str) -> Dict[str, Any
     }
 
 
+def _rename_single_worksheet_if_needed(
+    *,
+    sheets: Any,
+    spreadsheet_id: str,
+    target_title: str,
+) -> None:
+    metadata = (
+        sheets.spreadsheets()
+        .get(spreadsheetId=spreadsheet_id, fields="sheets/properties(sheetId,title)")
+        .execute()
+    )
+    sheets_meta = metadata.get("sheets") or []
+    if len(sheets_meta) != 1:
+        return
+
+    props = (sheets_meta[0] or {}).get("properties") or {}
+    sheet_id = props.get("sheetId")
+    current_title = str(props.get("title") or "").strip()
+    desired_title = _sanitize_google_title(target_title, default="Candidates", max_len=100)
+    if not sheet_id or not desired_title or current_title == desired_title:
+        return
+
+    (
+        sheets.spreadsheets()
+        .batchUpdate(
+            spreadsheetId=spreadsheet_id,
+            body={
+                "requests": [
+                    {
+                        "updateSheetProperties": {
+                            "properties": {"sheetId": int(sheet_id), "title": desired_title},
+                            "fields": "title",
+                        }
+                    }
+                ]
+            },
+        )
+        .execute()
+    )
+
+
 def _ensure_worksheet_title(
     *,
     sheets: Any,
@@ -280,6 +321,7 @@ def create_google_sheet_placeholder(
     worksheet_title: str = "Candidates",
 ) -> Dict[str, str]:
     clients = _build_google_clients()
+    sheets = clients["sheets"]
     drive = clients["drive"]
 
     title = _sanitize_google_title(spreadsheet_title, default="Scored Candidates", max_len=200)
@@ -303,6 +345,15 @@ def create_google_sheet_placeholder(
         _raise_google_http_error("create the result spreadsheet", exc)
     spreadsheet_id = created["id"]
     spreadsheet_url = created.get("webViewLink") or f"https://docs.google.com/spreadsheets/d/{spreadsheet_id}"
+
+    try:
+        _rename_single_worksheet_if_needed(
+            sheets=sheets,
+            spreadsheet_id=spreadsheet_id,
+            target_title=tab_name,
+        )
+    except HttpError as exc:
+        _raise_google_http_error(f"rename initial worksheet to '{tab_name}'", exc)
 
     try:
         _ensure_domain_permission(
