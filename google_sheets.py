@@ -223,7 +223,10 @@ def _execute_google_request_with_retries(*, action: str, request_factory: Callab
 def _get_spreadsheet_metadata(sheets: Any, spreadsheet_id: str) -> Dict[str, Any]:
     metadata = (
         sheets.spreadsheets()
-        .get(spreadsheetId=spreadsheet_id, fields="properties/title,sheets/properties(title,sheetId)")
+        .get(
+            spreadsheetId=spreadsheet_id,
+            fields="properties/title,sheets/properties(title,sheetId,gridProperties(rowCount,columnCount))",
+        )
         .execute()
     )
     spreadsheet_title = ((metadata.get("properties") or {}).get("title") or "").strip()
@@ -232,6 +235,7 @@ def _get_spreadsheet_metadata(sheets: Any, spreadsheet_id: str) -> Dict[str, Any
         raise RuntimeError("Google Sheet has no worksheets.")
     tab_titles: List[str] = []
     tab_ids_by_title: Dict[str, int] = {}
+    tab_grid_by_title: Dict[str, Dict[str, int]] = {}
     for item in sheets_meta:
         properties = (item or {}).get("properties") or {}
         title = properties.get("title")
@@ -241,12 +245,23 @@ def _get_spreadsheet_metadata(sheets: Any, spreadsheet_id: str) -> Dict[str, Any
             sheet_id = properties.get("sheetId")
             if isinstance(sheet_id, int):
                 tab_ids_by_title[clean_title] = sheet_id
+            grid_props = properties.get("gridProperties") or {}
+            row_count = grid_props.get("rowCount")
+            column_count = grid_props.get("columnCount")
+            grid_entry: Dict[str, int] = {}
+            if isinstance(row_count, int) and row_count > 0:
+                grid_entry["row_count"] = row_count
+            if isinstance(column_count, int) and column_count > 0:
+                grid_entry["column_count"] = column_count
+            if grid_entry:
+                tab_grid_by_title[clean_title] = grid_entry
     if not tab_titles:
         raise RuntimeError("Google Sheet has no worksheets.")
     return {
         "spreadsheet_title": spreadsheet_title,
         "tab_titles": tab_titles,
         "tab_ids_by_title": tab_ids_by_title,
+        "tab_grid_by_title": tab_grid_by_title,
     }
 
 
@@ -322,6 +337,53 @@ def _ensure_worksheet_title(
         )
         return requested_clean
     return available_titles[0]
+
+
+def _ensure_worksheet_grid_capacity(
+    *,
+    sheets: Any,
+    spreadsheet_id: str,
+    sheet_id: int,
+    current_rows: int,
+    current_columns: int,
+    required_rows: int,
+    required_columns: int,
+) -> None:
+    safe_current_rows = max(0, int(current_rows or 0))
+    safe_current_columns = max(0, int(current_columns or 0))
+    target_rows = max(safe_current_rows, int(required_rows or 0))
+    target_columns = max(safe_current_columns, int(required_columns or 0))
+
+    if target_rows <= safe_current_rows and target_columns <= safe_current_columns:
+        return
+
+    target_rows = max(1, target_rows)
+    target_columns = max(1, target_columns)
+    _execute_google_request_with_retries(
+        action=f"resize worksheet grid for sheetId {sheet_id} in spreadsheet '{spreadsheet_id}'",
+        request_factory=lambda: (
+            sheets.spreadsheets()
+            .batchUpdate(
+                spreadsheetId=spreadsheet_id,
+                body={
+                    "requests": [
+                        {
+                            "updateSheetProperties": {
+                                "properties": {
+                                    "sheetId": int(sheet_id),
+                                    "gridProperties": {
+                                        "rowCount": target_rows,
+                                        "columnCount": target_columns,
+                                    },
+                                },
+                                "fields": "gridProperties.rowCount,gridProperties.columnCount",
+                            }
+                        }
+                    ]
+                },
+            )
+        ),
+    )
 
 
 def _to_sheet_values(df: pd.DataFrame) -> List[List[Any]]:
@@ -630,8 +692,36 @@ def write_dataframe_to_google_sheet(
         )
     except HttpError as exc:
         _raise_google_http_error(f"ensure worksheet '{worksheet_title}' exists", exc)
+
+    try:
+        metadata = _get_spreadsheet_metadata(sheets=sheets, spreadsheet_id=spreadsheet_id)
+    except HttpError as exc:
+        _raise_google_http_error(f"refresh spreadsheet metadata for '{spreadsheet_id}'", exc)
+
     values = _to_sheet_values(df)
     headers: List[str] = [str(h) for h in values[0]] if values else []
+    tab_id = (metadata.get("tab_ids_by_title") or {}).get(tab_name)
+    tab_grid = (metadata.get("tab_grid_by_title") or {}).get(tab_name) or {}
+    required_rows = len(values)
+    required_columns = max((len(row) for row in values), default=0)
+
+    if isinstance(tab_id, int) and required_rows > 0 and required_columns > 0:
+        try:
+            _ensure_worksheet_grid_capacity(
+                sheets=sheets,
+                spreadsheet_id=spreadsheet_id,
+                sheet_id=tab_id,
+                current_rows=int(tab_grid.get("row_count") or 0),
+                current_columns=int(tab_grid.get("column_count") or 0),
+                required_rows=required_rows,
+                required_columns=required_columns,
+            )
+        except HttpError as exc:
+            _raise_google_http_error(
+                f"resize worksheet '{tab_name}' grid in spreadsheet '{spreadsheet_id}'",
+                exc,
+            )
+
     try:
         _write_values_chunked(
             sheets=sheets,
@@ -643,7 +733,6 @@ def write_dataframe_to_google_sheet(
         _raise_google_http_error(f"write candidate rows into spreadsheet '{spreadsheet_id}'", exc)
 
     if hidden_column_names:
-        tab_id = (metadata.get("tab_ids_by_title") or {}).get(tab_name)
         if isinstance(tab_id, int):
             try:
                 _hide_columns_by_header_name(
