@@ -81,6 +81,7 @@ Optional:
 - `EXA_MAX_QPS` (default `2`; global Exa request cap shared across all Exa threads, including retry attempts)
 - `SCORING_CONCURRENT_CALLS` (default `24`)
 - `SCORING_MAX_INFLIGHT_FACTOR` (default `2`; max in-flight scoring futures = `SCORING_CONCURRENT_CALLS * factor`)
+- `PIPELINE_INCLUDE_RAW_JSON` (default `false`; set `true` only for debugging, increases memory usage)
 - `SCORE_PROGRESS_NOTIFY_EVERY` (default `50`)
 - `SCORE_INITIAL_SECONDS_PER_CANDIDATE` (default `2.5`)
 - `INSTANTLY_CAMPAIGN_TIMEZONE` (default `Asia/Kolkata`)
@@ -217,6 +218,7 @@ Notes:
 - `nixpacks.toml` now defaults to the JD worker script, so an existing single Railway worker service will continue as a JD worker.
 - The reply worker should be a separate Railway service that points to the same repo and same env vars, but uses the reply start command above.
 - Replica count is configured in Railway service settings, not in this repo.
+- If Railway logs `Work-horse terminated unexpectedly; waitpid returned 9`, reduce memory pressure by lowering `SCORING_CONCURRENT_CALLS` (for example `4`) and keep `PIPELINE_INCLUDE_RAW_JSON=false`.
 
 Endpoints:
 - `GET /healthz`

@@ -178,6 +178,12 @@ def _safe_env_float(name: str, default: float) -> float:
     return value
 
 
+def _is_truthy(value: Optional[str], default: bool) -> bool:
+    if value is None:
+        return default
+    return value.strip().lower() not in {"0", "false", "no", "off", ""}
+
+
 class ExaRateLimiter:
     def __init__(self, max_qps: float):
         self.max_qps = max_qps
@@ -236,6 +242,10 @@ def get_scoring_concurrent_calls() -> int:
 def get_scoring_max_inflight(scoring_workers: int) -> int:
     factor = _read_positive_int_env("SCORING_MAX_INFLIGHT_FACTOR", DEFAULT_SCORING_INFLIGHT_FACTOR)
     return max(1, scoring_workers * factor)
+
+
+def should_include_raw_json() -> bool:
+    return _is_truthy(os.getenv("PIPELINE_INCLUDE_RAW_JSON"), default=False)
 
 
 def require_env(name: str) -> str:
@@ -974,6 +984,7 @@ def flatten_exa_results_to_rows(
     results: List[Dict[str, Any]],
     expansion_prompt_file: str = "",
     widened_jd_context: str = "",
+    include_raw_json: bool = False,
 ) -> List[Dict[str, Any]]:
     rows: List[Dict[str, Any]] = []
 
@@ -1037,8 +1048,9 @@ def flatten_exa_results_to_rows(
             "highlights": highlights_text,
             "highlight_scores": normalize_whitespace(item.get("highlightScores")),
             "text": text,
-            "raw_json": json.dumps(item, ensure_ascii=False),
         }
+        if include_raw_json:
+            row["raw_json"] = json.dumps(item, ensure_ascii=False)
 
         flatten_work_history(row, work_history)
         flatten_education_history(row, education_history)
@@ -1047,6 +1059,21 @@ def flatten_exa_results_to_rows(
         rows.append(row)
 
     return rows
+
+
+def combine_batch_csvs(batch_csv_paths: List[str], output_csv: str) -> int:
+    if not batch_csv_paths:
+        pd.DataFrame().to_csv(output_csv, index=False)
+        return 0
+
+    total_rows = 0
+    for batch_idx, path in enumerate(batch_csv_paths):
+        batch_df = reorder_columns(read_pipeline_csv(path), BASE_CSV_FIRST_COLUMNS)
+        total_rows += len(batch_df)
+        batch_df.to_csv(output_csv, index=False, mode="w" if batch_idx == 0 else "a", header=(batch_idx == 0))
+        del batch_df
+        gc.collect()
+    return total_rows
 
 
 def reorder_columns(df: pd.DataFrame, first_columns: List[str]) -> pd.DataFrame:
@@ -1305,8 +1332,8 @@ def score_candidates_csv(
 
     def _candidate_text_for_idx(idx: int) -> str:
         text = normalize_whitespace(df.at[idx, "text"]) if "text" in df.columns else ""
-        if not text and "raw_json" in df.columns:
-            text = normalize_whitespace(df.at[idx, "raw_json"])
+        if not text and "highlights" in df.columns:
+            text = normalize_whitespace(df.at[idx, "highlights"])
         return text
 
     with ThreadPoolExecutor(max_workers=scoring_workers) as executor:
@@ -1879,6 +1906,7 @@ def run_pipeline_from_jd_text(
     batch_csv_paths: List[str] = []
     total_exa_results = 0
     total_csv_rows = 0
+    include_raw_json = should_include_raw_json()
     batch_dir = os.path.join(os.path.dirname(args.candidates_csv), "exa-batches")
     os.makedirs(batch_dir, exist_ok=True)
     total_query_gen_usage: Dict[str, int] = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
@@ -1912,6 +1940,7 @@ def run_pipeline_from_jd_text(
             batch_items,
             expansion_prompt_file=test_prompt_filename,
             widened_jd_context=profile,
+            include_raw_json=include_raw_json,
         )
         batch_csv = os.path.join(batch_dir, "batch-1.csv")
         pd.DataFrame(batch_rows).to_csv(batch_csv, index=False)
@@ -1963,6 +1992,7 @@ def run_pipeline_from_jd_text(
                 batch_items,
                 expansion_prompt_file=wp_filename,
                 widened_jd_context=profile,
+                include_raw_json=include_raw_json,
             )
             batch_csv = os.path.join(batch_dir, f"batch-{wp_idx}.csv")
             pd.DataFrame(batch_rows).to_csv(batch_csv, index=False)
@@ -1981,16 +2011,7 @@ def run_pipeline_from_jd_text(
     maybe_stop(args.stop_after, "exa_search")
 
     debug_pause(args.debug, "csv")
-    # Combine batch CSVs into the final candidates CSV (only one DataFrame in memory).
-    csv_df = pd.concat(
-        [read_pipeline_csv(p) for p in batch_csv_paths],
-        ignore_index=True,
-    )
-    csv_df = reorder_columns(csv_df, BASE_CSV_FIRST_COLUMNS)
-    csv_df.to_csv(args.candidates_csv, index=False)
-    rows_before_dedup = len(csv_df)
-    del csv_df  # Free before dedup reads the same data from disk
-    gc.collect()
+    rows_before_dedup = combine_batch_csvs(batch_csv_paths, args.candidates_csv)
 
     maybe_stop(args.stop_after, "csv")
 
@@ -2038,16 +2059,26 @@ def run_pipeline_from_jd_text(
     else:
         sheet_ready_csv = f"{args.scored_csv}-sheet-ready.csv"
 
-    # Drop the heavy raw_json column before writing the sheet-ready CSV.
-    if "raw_json" in scored_df.columns:
-        scored_df.drop(columns=["raw_json"], inplace=True)
+    rows_scored = len(scored_df)
+    qualified_finds = count_qualified_finds(scored_df, minimum_score=5.0)
+    score_tally_lines = build_score_tally_lines(scored_df)
+    score_counts_by_score = build_score_counts_by_score(scored_df)
+    linkedin_sample_groups = collect_linkedin_samples_by_score(scored_df, per_score_limit=10)
+    linkedin_sample_lines = build_linkedin_samples_by_score_lines(scored_df, per_score_limit=10)
+
+    # Drop high-cardinality payload columns before creating sheet output to reduce peak memory.
+    scored_cols_to_drop = [col for col in ["raw_json"] if col in scored_df.columns]
+    scored_cols_to_drop.extend([col for col in scored_df.columns if re.fullmatch(r"work_\d+_description", str(col))])
+    if scored_cols_to_drop:
+        scored_df.drop(columns=sorted(set(scored_cols_to_drop)), inplace=True)
+        gc.collect()
+
     sheet_ready_df = write_sheet_ready_csv(sheet_ready_csv, scored_df)
+    del scored_df
     all_queries.clear()
     jd_context_by_prompt_file.clear()
     gc.collect()
 
-    rows_scored = len(scored_df)
-    qualified_finds = count_qualified_finds(scored_df, minimum_score=5.0)
     total_input_tokens = int(total_query_gen_usage.get("input_tokens", 0)) + int(scoring_usage.get("input_tokens", 0))
     total_output_tokens = int(total_query_gen_usage.get("output_tokens", 0)) + int(scoring_usage.get("output_tokens", 0))
     used_assumptions = False
@@ -2065,15 +2096,6 @@ def run_pipeline_from_jd_text(
         qualified_count=qualified_finds,
         used_assumptions=used_assumptions,
     )
-
-    # Build score tally before freeing the DataFrame.
-    score_tally_lines = build_score_tally_lines(scored_df)
-    score_counts_by_score = build_score_counts_by_score(scored_df)
-    linkedin_sample_groups = collect_linkedin_samples_by_score(scored_df, per_score_limit=10)
-    linkedin_sample_lines = build_linkedin_samples_by_score_lines(scored_df, per_score_limit=10)
-
-    del scored_df  # Free before Slack upload
-    gc.collect()
 
     elapsed = time.monotonic() - pipeline_start
     tally_block = "\n".join(score_tally_lines) if score_tally_lines else "  (no scores)"
