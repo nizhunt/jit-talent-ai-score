@@ -401,7 +401,7 @@ def fetch_latest_jd_from_slack(
                 jd_text = "\\n".join(lines[1:]).strip()
                 if jd_text:
                     return jd_text, message
-            if allow_test_header and re.match(r"(?i)^#\s*jd(?:\s*-\s*|\s+)test\b", header):
+            if allow_test_header and re.match(r"(?i)^#\s*jd(?:\s*-\s*|\s+)quick\b", header):
                 jd_text = "\\n".join(lines[1:]).strip()
                 if jd_text:
                     return jd_text, message
@@ -413,7 +413,7 @@ def fetch_latest_jd_from_slack(
 
     raise RuntimeError(
         "No JD message found. Expected a message with first line '# JD'"
-        + (" or '# JD-Test'." if allow_test_header else ".")
+        + (" or '# JD-Quick'." if allow_test_header else ".")
     )
 
 

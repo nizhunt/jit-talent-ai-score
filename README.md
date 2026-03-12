@@ -31,10 +31,10 @@ Supported header formats:
 - `# JD` (existing format)
 - `# JD <name>` (new, optional name)
 - `# JD: <name>` and `# JD | <name>` are also accepted
-- `# JD-Test` (low-cost test mode)
-- `# JD-Test <name>` and `# JD-Test: <name>` are also accepted
+- `# JD-Quick` (low-cost test mode)
+- `# JD-Quick <name>` and `# JD-Quick: <name>` are also accepted
 
-`# JD-Test` behavior:
+`# JD-Quick` behavior:
 - skips widening/query-generation and sends the raw JD text directly as the only Exa query
 - fetches a maximum of 100 sourced profiles
 - then runs the rest of the pipeline unchanged (dedup, scoring, Google Sheet, Slack summary)
