@@ -49,6 +49,7 @@ BASE_CSV_FIRST_COLUMNS = [
     "last_name",
     "name",
     "linkedin",
+    "work_history_summary",
     "location",
     "title",
     "current_title",
@@ -70,6 +71,23 @@ SHEET_COLUMN_LABEL_OVERRIDES = {
     "linkedin": "LinkedIn",
     "url": "URL",
     "id": "ID",
+}
+MAX_WORK_HISTORY_COLUMNS = 15
+SHEET_COLUMNS_TO_OMIT = {
+    "id",
+    "entity_id",
+    "entity_type",
+    "entity_version",
+    "company",
+    "author",
+    "image",
+    "url",
+    "published_date",
+    "score",
+    "highlights",
+    "highlight_scores",
+    "current_company",
+    "current_title",
 }
 
 QUERY_RESPONSE_SCHEMA = {
@@ -678,6 +696,89 @@ def pick_first_non_empty_from_sources(sources: List[Any], keys: List[str]) -> st
     return ""
 
 
+def _entity_properties_from_item(item: Dict[str, Any]) -> List[Dict[str, Any]]:
+    entities = item.get("entities")
+    if not isinstance(entities, list):
+        return []
+
+    properties: List[Dict[str, Any]] = []
+    for entity in entities:
+        if not isinstance(entity, dict):
+            continue
+        props = entity.get("properties")
+        if isinstance(props, dict):
+            properties.append(props)
+    return properties
+
+
+def pick_entity_metadata(item: Dict[str, Any]) -> Tuple[str, str, str]:
+    entities = item.get("entities")
+    if not isinstance(entities, list):
+        return "", "", ""
+
+    for entity in entities:
+        if not isinstance(entity, dict):
+            continue
+        entity_id = pick_first_non_empty(entity, ["id", "entityId", "entity_id"])
+        entity_type = pick_first_non_empty(entity, ["type", "entityType", "entity_type"])
+        entity_version = pick_first_non_empty(entity, ["version", "entityVersion", "entity_version"])
+        if entity_id or entity_type or entity_version:
+            return entity_id, entity_type, entity_version
+
+    return "", "", ""
+
+
+def pick_location(item: Dict[str, Any], work_history: List[Any]) -> str:
+    top_level_location = pick_first_non_empty(
+        item,
+        ["location", "currentLocation", "current_location", "city", "region", "country"],
+    )
+    if top_level_location:
+        return top_level_location
+
+    entity_location = pick_first_non_empty_from_sources(
+        _entity_properties_from_item(item),
+        [
+            "location",
+            "currentLocation",
+            "current_location",
+            "city",
+            "region",
+            "country",
+            "formattedLocation",
+            "formatted_location",
+        ],
+    )
+    if entity_location:
+        return entity_location
+
+    extras = item.get("extras")
+    if isinstance(extras, dict):
+        extras_location = pick_first_non_empty(
+            extras,
+            [
+                "location",
+                "currentLocation",
+                "current_location",
+                "city",
+                "region",
+                "country",
+                "formattedLocation",
+                "formatted_location",
+            ],
+        )
+        if extras_location:
+            return extras_location
+
+    for entry in work_history:
+        if isinstance(entry, dict):
+            work_location = pick_first_non_empty(entry, ["location", "place"])
+            if work_location:
+                return work_location
+
+    return ""
+
+
 def split_name(name: str, explicit_first_name: str = "", explicit_last_name: str = "") -> Tuple[str, str]:
     first_name = normalize_whitespace(explicit_first_name)
     last_name = normalize_whitespace(explicit_last_name)
@@ -753,7 +854,7 @@ def flatten_work_history(row: Dict[str, Any], work_history: List[Any]) -> None:
     row["work_history_count"] = len(work_history)
     summary_parts: List[str] = []
 
-    for idx, entry in enumerate(work_history, start=1):
+    for idx, entry in enumerate(work_history[:MAX_WORK_HISTORY_COLUMNS], start=1):
         if isinstance(entry, dict):
             title = pick_first_non_empty(entry, ["title", "position", "role"])
             location = pick_first_non_empty(entry, ["location", "place"])
@@ -883,7 +984,12 @@ def flatten_exa_results_to_rows(
 
         explicit_first_name = pick_first_non_empty(item, ["firstName", "first_name", "given_name"])
         explicit_last_name = pick_first_non_empty(item, ["lastName", "last_name", "family_name"])
-        full_name = normalize_whitespace(item.get("name") or item.get("author"))
+        entity_properties = _entity_properties_from_item(item)
+        full_name = normalize_whitespace(
+            item.get("name")
+            or pick_first_non_empty_from_sources(entity_properties, ["name", "fullName", "full_name"])
+            or item.get("author")
+        )
         first_name, last_name = split_name(
             name=full_name,
             explicit_first_name=explicit_first_name,
@@ -894,6 +1000,8 @@ def flatten_exa_results_to_rows(
         work_history = extract_work_history(item)
         education_history = extract_education_history(item)
         skills = normalize_list(item.get("skills"))
+        entity_id, entity_type, entity_version = pick_entity_metadata(item)
+        location = pick_location(item, work_history)
 
         row = {
             "source_query_index": item.get("_source_query_index"),
@@ -901,9 +1009,9 @@ def flatten_exa_results_to_rows(
             "expansion_prompt_file": expansion_prompt_file,
             "widened_jd_context": widened_jd_context,
             "id": normalize_whitespace(item.get("id")),
-            "entity_id": normalize_whitespace(item.get("entityId")),
-            "entity_type": normalize_whitespace(item.get("entityType")),
-            "entity_version": normalize_whitespace(item.get("entityVersion")),
+            "entity_id": entity_id,
+            "entity_type": entity_type,
+            "entity_version": entity_version,
             "name": name,
             "first_name": first_name,
             "last_name": last_name,
@@ -911,7 +1019,7 @@ def flatten_exa_results_to_rows(
             "current_title": pick_first_non_empty(item, ["current_title", "currentTitle", "title"]),
             "current_company": pick_first_non_empty(item, ["current_company", "currentCompany", "company"]),
             "company": normalize_whitespace(item.get("company")),
-            "location": normalize_whitespace(item.get("location")),
+            "location": location,
             "author": normalize_whitespace(item.get("author")),
             "image": normalize_whitespace(item.get("image")),
             "linkedin": pick_linkedin(item),
@@ -967,8 +1075,25 @@ def prettify_sheet_column_name(column: str) -> str:
 
 
 def write_sheet_ready_csv(path: str, df: pd.DataFrame) -> pd.DataFrame:
-    rename_map = {col: prettify_sheet_column_name(str(col)) for col in df.columns}
-    sheet_df = df.rename(columns=rename_map)
+    columns_to_drop = {col for col in df.columns if col in SHEET_COLUMNS_TO_OMIT}
+    for col in df.columns:
+        work_match = re.fullmatch(r"work_(\d+)_(title|company|company_id|location|from|to|description)", str(col))
+        if work_match and int(work_match.group(1)) > MAX_WORK_HISTORY_COLUMNS:
+            columns_to_drop.add(col)
+            continue
+        if re.fullmatch(r"work_\d+_description", str(col)):
+            columns_to_drop.add(col)
+
+    sheet_df = df.drop(columns=sorted(columns_to_drop), errors="ignore")
+    if {"linkedin", "work_history_summary", "location"}.issubset(sheet_df.columns):
+        ordered_cols = [col for col in sheet_df.columns if col not in {"work_history_summary", "location"}]
+        linkedin_index = ordered_cols.index("linkedin")
+        ordered_cols.insert(linkedin_index + 1, "work_history_summary")
+        ordered_cols.insert(linkedin_index + 2, "location")
+        sheet_df = sheet_df[ordered_cols]
+
+    rename_map = {col: prettify_sheet_column_name(str(col)) for col in sheet_df.columns}
+    sheet_df = sheet_df.rename(columns=rename_map)
     sheet_df.to_csv(path, index=False)
     return sheet_df
 
