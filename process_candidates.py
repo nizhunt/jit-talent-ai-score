@@ -1127,6 +1127,16 @@ def write_sheet_ready_csv(path: str, df: pd.DataFrame) -> pd.DataFrame:
         ordered_cols.insert(linkedin_index + 2, "location")
         sheet_df = sheet_df[ordered_cols]
 
+    score_column = next((col for col in ["ai-score", "score", "AI Score", "Score"] if col in sheet_df.columns), "")
+    if score_column:
+        # Keep ranking deterministic: highest scores first, non-numeric scores at the bottom.
+        numeric_scores = pd.to_numeric(sheet_df[score_column], errors="coerce")
+        sheet_df = (
+            sheet_df.assign(_sort_score=numeric_scores)
+            .sort_values(by="_sort_score", ascending=False, na_position="last", kind="mergesort")
+            .drop(columns=["_sort_score"])
+        )
+
     rename_map = {col: prettify_sheet_column_name(str(col)) for col in sheet_df.columns}
     sheet_df = sheet_df.rename(columns=rename_map)
     sheet_df.to_csv(path, index=False)

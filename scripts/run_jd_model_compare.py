@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run a JD experiment comparing gpt-5-nano vs gpt-5-mini on prod extraction+scoring path."""
+"""Run a JD experiment comparing two models on prod extraction+scoring path."""
 
 from __future__ import annotations
 
@@ -307,7 +307,7 @@ def _build_side_by_side(
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Compare gpt-5-nano vs gpt-5-mini on JD test mode pipeline")
+    parser = argparse.ArgumentParser(description="Compare two models on JD test mode pipeline")
     parser.add_argument("--jd-file", default="", help="Path to file containing JD text. If omitted, uses built-in JD.")
     parser.add_argument(
         "--output-dir",
@@ -315,7 +315,7 @@ def parse_args() -> argparse.Namespace:
         help="Directory for all outputs.",
     )
     parser.add_argument("--model-a", default="gpt-5-nano")
-    parser.add_argument("--model-b", default="gpt-5-mini")
+    parser.add_argument("--model-b", default="gpt-5-nano")
     return parser.parse_args()
 
 
