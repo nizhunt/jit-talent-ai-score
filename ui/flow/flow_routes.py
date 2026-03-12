@@ -130,7 +130,7 @@ def _default_flow_definition() -> Dict[str, Any]:
                     "BATCH LOOP START — For each of the 6 JD-widening prompts "
                     "(original, wider-location, wider-titles, wider-yoe, "
                     "wider-companies, lenient-skills): applies the meta prompt "
-                    "via gpt-5-mini to produce a structured search profile."
+                    "via gpt-5-nano to produce a structured search profile."
                 ),
                 "status": "current",
                 "x": 1820,
@@ -141,7 +141,7 @@ def _default_flow_definition() -> Dict[str, Any]:
                 "type": "action",
                 "label": "Generate 10 Exa Queries (per batch)",
                 "description": (
-                    "Inside the batch loop: gpt-5-mini generates 10 Exa search queries "
+                    "Inside the batch loop: gpt-5-nano generates 10 Exa search queries "
                     "from the widened profile. Runs once per widening prompt "
                     "(6 × 10 = 60 queries total)."
                 ),
@@ -204,7 +204,7 @@ def _default_flow_definition() -> Dict[str, Any]:
                 "type": "action",
                 "label": "Score Candidates with AI (100 concurrent)",
                 "description": (
-                    "Applies gpt-5-mini scoring prompt to each candidate against the original JD "
+                    "Applies gpt-5-nano scoring prompt to each candidate against the original JD "
                     "with 100 concurrent threads. Posts progress updates to Slack at 25%, 50%, 75%."
                 ),
                 "status": "current",
