@@ -90,7 +90,7 @@ Optional:
 - `GOOGLE_WORKSPACE_DOMAIN_ROLE` (default `writer`; set `reader` or `commenter` if needed)
 - `THREAD_ENRICHMENT_VERBOSE_UPDATES` (default `false`; if true, posts intermediate stage updates in thread)
 - `DASHBOARD_GOOGLE_SHEET_URL` (optional; if set, upserts JD + enrichment metrics into this dashboard sheet)
-- `DASHBOARD_WORKSHEET_NAME` (optional; tab name inside `DASHBOARD_GOOGLE_SHEET_URL`; default is first tab)
+- `DASHBOARD_WORKSHEET_NAME` (optional; tab name inside `DASHBOARD_GOOGLE_SHEET_URL`; default `info-log`)
 
 ## Dashboard Logging (Optional)
 

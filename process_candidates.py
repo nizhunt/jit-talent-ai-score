@@ -19,7 +19,7 @@ from dotenv import load_dotenv
 from openai import OpenAI
 from tqdm import tqdm
 
-from google_sheets import create_google_sheet_from_dataframe
+from google_sheets import create_google_sheet_placeholder, write_dataframe_to_google_sheet
 
 try:
     from exa_py import Exa
@@ -251,6 +251,12 @@ def read_text_file(path: str) -> str:
 def write_text_file(path: str, content: str) -> None:
     with open(path, "w", encoding="utf-8") as f:
         f.write(content)
+
+
+def read_pipeline_csv(path: str) -> pd.DataFrame:
+    # Avoid chunked dtype inference for wide work-history CSVs; Railway logs these as
+    # mixed-type warnings because sparse columns can contain both empty and scalar values.
+    return pd.read_csv(path, low_memory=False)
 
 
 def cleanup_legacy_exa_query_logs() -> int:
@@ -959,7 +965,7 @@ def write_sheet_ready_csv(path: str, df: pd.DataFrame) -> pd.DataFrame:
 
 
 def deduplicate_csv(input_csv: str, output_csv: str) -> pd.DataFrame:
-    df = pd.read_csv(input_csv)
+    df = read_pipeline_csv(input_csv)
     if df.empty:
         df.to_csv(output_csv, index=False)
         return df
@@ -1077,7 +1083,7 @@ def score_candidates_csv(
     model: str,
     progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
 ) -> Tuple[pd.DataFrame, Dict[str, int]]:
-    df = pd.read_csv(input_csv)
+    df = read_pipeline_csv(input_csv)
     if "ai-score" not in df.columns:
         df["ai-score"] = None
     if "ai-reason" not in df.columns:
@@ -1517,7 +1523,7 @@ def run_pipeline_from_jd_text(
     debug_pause(args.debug, "csv")
     # Combine batch CSVs into the final candidates CSV (only one DataFrame in memory).
     csv_df = pd.concat(
-        [pd.read_csv(p) for p in batch_csv_paths],
+        [read_pipeline_csv(p) for p in batch_csv_paths],
         ignore_index=True,
     )
     csv_df = reorder_columns(csv_df, BASE_CSV_FIRST_COLUMNS)
@@ -1535,6 +1541,16 @@ def run_pipeline_from_jd_text(
     gc.collect()
 
     maybe_stop(args.stop_after, "dedup")
+
+    # Create the result sheet before the expensive scoring stage so Google permission
+    # issues fail fast instead of after full scoring completes.
+    sheet_title = build_sheet_title(jd_name=jd_name, scored_csv_path=args.scored_csv)
+    google_sheet = create_google_sheet_placeholder(
+        spreadsheet_title=sheet_title,
+        folder_id=require_env("GOOGLE_DRIVE_FOLDER_ID"),
+        workspace_domain=require_env("GOOGLE_WORKSPACE_DOMAIN"),
+        domain_role=get_google_domain_role(),
+    )
 
     debug_pause(args.debug, "score")
 
@@ -1615,15 +1631,14 @@ def run_pipeline_from_jd_text(
         cost_per_find_line = f"Est. cost/find (score >= 5): ${cost_summary['per_find']:.4f}\n"
     else:
         cost_per_find_line = "Est. cost/find (score >= 5): N/A (no candidates scored 5+)\n"
-    sheet_title = build_sheet_title(jd_name=jd_name, scored_csv_path=args.scored_csv)
-    google_sheet = create_google_sheet_from_dataframe(
+    google_sheet_write_result = write_dataframe_to_google_sheet(
+        spreadsheet_id=google_sheet["spreadsheet_id"],
         df=sheet_ready_df,
-        spreadsheet_title=sheet_title,
-        folder_id=require_env("GOOGLE_DRIVE_FOLDER_ID"),
-        workspace_domain=require_env("GOOGLE_WORKSPACE_DOMAIN"),
-        domain_role=get_google_domain_role(),
     )
-    google_sheet_url = google_sheet["spreadsheet_url"]
+    google_sheet["spreadsheet_title"] = (
+        google_sheet_write_result.get("spreadsheet_title") or google_sheet.get("spreadsheet_title")
+    )
+    google_sheet_url = google_sheet_write_result.get("spreadsheet_url") or google_sheet["spreadsheet_url"]
     result_prefix = normalize_whitespace(os.getenv("RESULT_MESSAGE_PREFIX", "AI-scored candidates sheet for this JD"))
     prefix_line = f"{result_prefix}\n" if result_prefix else ""
 

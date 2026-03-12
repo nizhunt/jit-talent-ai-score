@@ -1,3 +1,4 @@
+import html
 import os
 import re
 import time
@@ -23,29 +24,23 @@ INSTANTLY_CAMPAIGN_CREATE_URL = "https://api.instantly.ai/api/v2/campaigns"
 INSTANTLY_LEAD_CREATE_URL = "https://api.instantly.ai/api/v2/leads"
 INSTANTLY_STEP_ONE_SUBJECT = "New role at a startup!"
 INSTANTLY_STEP_ONE_BODY = (
-    "Hi {{firstName}},\n\n"
-    "{{personalization}}\n\n"
-    "Do you have a few minutes this week? Great to share more\n\n"
-    "Best,\n"
-    "Dan\n"
-    "CEO & Co-founder, Calyptus"
+    "<p>Hi {{firstName}},</p>"
+    "<p>{{personalization}}</p>"
+    "<p>Do you have a few minutes this week? Great to share more</p>"
+    "<p>Best,<br />Dan<br />CEO and Co-founder, Calyptus</p>"
 )
 INSTANTLY_STEP_TWO_BODY = (
-    "Following up here as the team are moving fast, and you have a fantastic profile.\n\n"
-    "Would you be open to chat?\n\n"
-    "Love to connect you with Dianmarie, our senior recruiter who is leading the process!\n\n"
-    "Best,\n"
-    "Dan\n"
-    "CEO & Co-founder, Calyptus"
+    "<p>Following up here as the team are moving fast, and you have a fantastic profile.</p>"
+    "<p>Would you be open to chat?</p>"
+    "<p>Love to connect you with Dianmarie, our senior recruiter who is leading the process!</p>"
+    "<p>Best,<br />Dan<br />CEO and Co-founder, Calyptus</p>"
 )
 INSTANTLY_STEP_THREE_BODY = (
-    "Final follow up from me {{firstName}}\n\n"
-    "If this role is not of interest but you want to be kept updated with other roles at top tech startups, "
-    "coming out of a16z or Antler, then let us know.\n\n"
-    "Our team would love to chat.\n\n"
-    "All the best,\n"
-    "Dan\n"
-    "CEO & Co-founder, Calyptus"
+    "<p>Final follow up from me {{firstName}}</p>"
+    "<p>If this role is not of interest but you want to be kept updated with other roles at top tech startups, "
+    "coming out of a16z or Antler, then let us know.</p>"
+    "<p>Our team would love to chat.</p>"
+    "<p>All the best,<br />Dan<br />CEO and Co-founder, Calyptus</p>"
 )
 
 RESULT_MESSAGE_PREFIX_DEFAULT = "AI-scored candidates sheet for this JD"
@@ -157,6 +152,15 @@ def _clean_personalization_snippet(generated_email: str) -> str:
             cleaned_lines.append(raw_line.rstrip())
 
     return "\n".join(cleaned_lines).strip()
+
+
+def _format_instantly_html_text(text: str) -> str:
+    clean = (text or "").strip()
+    if not clean:
+        return ""
+    normalized = clean.replace("\r\n", "\n").replace("\r", "\n")
+    escaped = html.escape(normalized, quote=False)
+    return escaped.replace("\n\n", "<br /><br />").replace("\n", "<br />")
 
 
 def _normalize_linkedin_url(url: str) -> str:
@@ -708,7 +712,8 @@ def _add_lead_to_instantly_campaign(
     linkedin_url = lead.get("linkedin_url", "")
     generated_email = (lead.get("generated_email") or "").strip()
     personalization_body = _clean_personalization_snippet(generated_email)
-    personalization = personalization_body if personalization_body else (f"LinkedIn: {linkedin_url}" if linkedin_url else "")
+    personalization_raw = personalization_body if personalization_body else (f"LinkedIn: {linkedin_url}" if linkedin_url else "")
+    personalization = _format_instantly_html_text(personalization_raw)
     payload = {
         "email": lead["email"],
         "campaign": campaign_id,

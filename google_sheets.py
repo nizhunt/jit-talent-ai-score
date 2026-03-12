@@ -58,6 +58,39 @@ def _build_google_clients() -> Dict[str, Any]:
     return {"sheets": sheets, "drive": drive}
 
 
+def _extract_google_http_error_message(exc: HttpError) -> str:
+    raw_content = getattr(exc, "content", None)
+    if raw_content:
+        try:
+            decoded = raw_content.decode("utf-8", errors="replace") if isinstance(raw_content, (bytes, bytearray)) else str(raw_content)
+            parsed = json.loads(decoded)
+            message = ((parsed.get("error") or {}).get("message") or "").strip()
+            if message:
+                return message
+            decoded = decoded.strip()
+            if decoded:
+                return decoded
+        except Exception:
+            pass
+    return str(exc)
+
+
+def _raise_google_http_error(action: str, exc: HttpError) -> None:
+    status_code = getattr(getattr(exc, "resp", None), "status", None) or getattr(exc, "status_code", None)
+    detail = _extract_google_http_error_message(exc)
+    parts = [f"Google API failed while trying to {action}."]
+    if status_code:
+        parts.append(f"HTTP {status_code}.")
+    if detail:
+        parts.append(detail)
+    if status_code == 403:
+        parts.append(
+            "Verify GOOGLE_SERVICE_ACCOUNT_JSON has Sheets/Drive API access, "
+            "and that the account can create files and share inside your Google Workspace."
+        )
+    raise RuntimeError(" ".join(parts)) from exc
+
+
 def _sanitize_google_title(value: str, default: str, max_len: int) -> str:
     cleaned = re.sub(r"\s+", " ", (value or "")).strip()
     if not cleaned:
@@ -215,47 +248,118 @@ def create_google_sheet_from_dataframe(
     domain_role: str = "writer",
     worksheet_title: str = "Candidates",
 ) -> Dict[str, str]:
+    created_sheet = create_google_sheet_placeholder(
+        spreadsheet_title=spreadsheet_title,
+        folder_id=folder_id,
+        workspace_domain=workspace_domain,
+        domain_role=domain_role,
+        worksheet_title=worksheet_title,
+    )
+    write_result = write_dataframe_to_google_sheet(
+        spreadsheet_id=created_sheet["spreadsheet_id"],
+        df=df,
+        worksheet_title=worksheet_title,
+    )
+    created_sheet["spreadsheet_title"] = write_result.get("spreadsheet_title") or created_sheet["spreadsheet_title"]
+    created_sheet["worksheet_title"] = write_result.get("worksheet_title") or worksheet_title
+    return created_sheet
+
+
+def create_google_sheet_placeholder(
+    *,
+    spreadsheet_title: str,
+    folder_id: str,
+    workspace_domain: str,
+    domain_role: str = "writer",
+    worksheet_title: str = "Candidates",
+) -> Dict[str, str]:
     clients = _build_google_clients()
-    sheets = clients["sheets"]
     drive = clients["drive"]
 
     title = _sanitize_google_title(spreadsheet_title, default="Scored Candidates", max_len=200)
     tab_name = _sanitize_google_title(worksheet_title, default="Candidates", max_len=100)
-    body = {"properties": {"title": title}, "sheets": [{"properties": {"title": tab_name}}]}
 
-    created = (
-        sheets.spreadsheets()
-        .create(body=body, fields="spreadsheetId,spreadsheetUrl,properties/title")
-        .execute()
-    )
-    spreadsheet_id = created["spreadsheetId"]
-    spreadsheet_url = created.get("spreadsheetUrl") or f"https://docs.google.com/spreadsheets/d/{spreadsheet_id}"
-
-    values = _to_sheet_values(df)
-    (
-        sheets.spreadsheets()
-        .values()
-        .update(
-            spreadsheetId=spreadsheet_id,
-            range=f"'{tab_name}'!A1",
-            valueInputOption="RAW",
-            body={"values": values},
+    try:
+        created = (
+            drive.files()
+            .create(
+                body={
+                    "name": title,
+                    "mimeType": "application/vnd.google-apps.spreadsheet",
+                    "parents": [folder_id],
+                },
+                supportsAllDrives=True,
+                fields="id,name,webViewLink",
+            )
+            .execute()
         )
-        .execute()
-    )
+    except HttpError as exc:
+        _raise_google_http_error("create the result spreadsheet", exc)
+    spreadsheet_id = created["id"]
+    spreadsheet_url = created.get("webViewLink") or f"https://docs.google.com/spreadsheets/d/{spreadsheet_id}"
 
-    _move_file_to_folder(drive=drive, file_id=spreadsheet_id, folder_id=folder_id)
-    _ensure_domain_permission(
-        drive=drive,
-        file_id=spreadsheet_id,
-        domain=workspace_domain,
-        role=domain_role,
-    )
+    try:
+        _ensure_domain_permission(
+            drive=drive,
+            file_id=spreadsheet_id,
+            domain=workspace_domain,
+            role=domain_role,
+        )
+    except HttpError as exc:
+        _raise_google_http_error(f"share spreadsheet with domain '{workspace_domain}' as '{domain_role}'", exc)
 
     return {
         "spreadsheet_id": spreadsheet_id,
         "spreadsheet_url": spreadsheet_url,
         "spreadsheet_title": title,
+        "worksheet_title": tab_name,
+    }
+
+
+def write_dataframe_to_google_sheet(
+    *,
+    spreadsheet_id: str,
+    df: pd.DataFrame,
+    worksheet_title: str = "Candidates",
+) -> Dict[str, str]:
+    clients = _build_google_clients()
+    sheets = clients["sheets"]
+
+    try:
+        metadata = _get_spreadsheet_metadata(sheets=sheets, spreadsheet_id=spreadsheet_id)
+    except HttpError as exc:
+        _raise_google_http_error(f"read spreadsheet metadata for '{spreadsheet_id}'", exc)
+
+    try:
+        tab_name = _ensure_worksheet_title(
+            sheets=sheets,
+            spreadsheet_id=spreadsheet_id,
+            requested_title=worksheet_title,
+            available_titles=metadata["tab_titles"],
+        )
+    except HttpError as exc:
+        _raise_google_http_error(f"ensure worksheet '{worksheet_title}' exists", exc)
+    values = _to_sheet_values(df)
+    try:
+        (
+            sheets.spreadsheets()
+            .values()
+            .update(
+                spreadsheetId=spreadsheet_id,
+                range=f"'{tab_name}'!A1",
+                valueInputOption="RAW",
+                body={"values": values},
+            )
+            .execute()
+        )
+    except HttpError as exc:
+        _raise_google_http_error(f"write candidate rows into spreadsheet '{spreadsheet_id}'", exc)
+
+    return {
+        "spreadsheet_id": spreadsheet_id,
+        "spreadsheet_url": f"https://docs.google.com/spreadsheets/d/{spreadsheet_id}",
+        "spreadsheet_title": metadata.get("spreadsheet_title") or spreadsheet_id,
+        "worksheet_title": tab_name,
     }
 
 
@@ -273,8 +377,9 @@ def load_rows_from_google_sheet_url(sheet_url: str) -> Dict[str, Any]:
 
     metadata = _get_spreadsheet_metadata(sheets=sheets, spreadsheet_id=spreadsheet_id)
     spreadsheet_title = metadata["spreadsheet_title"]
-    first_tab = metadata["tab_titles"][0]
-    escaped_tab_name = _escape_tab_name(first_tab)
+    tab_titles = metadata["tab_titles"]
+    selected_tab = "Candidates" if "Candidates" in tab_titles else tab_titles[0]
+    escaped_tab_name = _escape_tab_name(selected_tab)
     range_name = f"'{escaped_tab_name}'"
 
     values_resp = (
@@ -289,6 +394,7 @@ def load_rows_from_google_sheet_url(sheet_url: str) -> Dict[str, Any]:
             "spreadsheet_id": spreadsheet_id,
             "spreadsheet_url": f"https://docs.google.com/spreadsheets/d/{spreadsheet_id}",
             "spreadsheet_title": spreadsheet_title or spreadsheet_id,
+            "worksheet_title": selected_tab,
             "rows": [],
         }
 
@@ -306,6 +412,7 @@ def load_rows_from_google_sheet_url(sheet_url: str) -> Dict[str, Any]:
         "spreadsheet_id": spreadsheet_id,
         "spreadsheet_url": f"https://docs.google.com/spreadsheets/d/{spreadsheet_id}",
         "spreadsheet_title": spreadsheet_title or spreadsheet_id,
+        "worksheet_title": selected_tab,
         "rows": rows,
     }
 

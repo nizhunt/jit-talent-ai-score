@@ -7,6 +7,7 @@ from google_sheets import upsert_row_in_google_sheet_url
 
 DASHBOARD_GOOGLE_SHEET_URL_ENV = "DASHBOARD_GOOGLE_SHEET_URL"
 DASHBOARD_WORKSHEET_NAME_ENV = "DASHBOARD_WORKSHEET_NAME"
+DEFAULT_DASHBOARD_WORKSHEET_NAME = "info-log"
 
 COL_LAST_UPDATED_UTC = "Last Updated (UTC)"
 COL_JD_CAMPAIGN_NAME = "JD Campaign Name"
@@ -51,7 +52,10 @@ def _dashboard_sheet_url() -> str:
 
 
 def _dashboard_worksheet_name() -> str:
-    return (os.getenv(DASHBOARD_WORKSHEET_NAME_ENV) or "").strip()
+    configured = (os.getenv(DASHBOARD_WORKSHEET_NAME_ENV) or "").strip()
+    if configured:
+        return configured
+    return DEFAULT_DASHBOARD_WORKSHEET_NAME
 
 
 def _now_utc_label() -> str:
