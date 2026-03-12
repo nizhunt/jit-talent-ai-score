@@ -111,3 +111,4 @@ Use the reasoning and JD to write the personalization snippet.
 (LinkedIn): [PASTE LINKEDIN DATA]
 
 Job Description: [PASTE JD TEXT]  
+---
