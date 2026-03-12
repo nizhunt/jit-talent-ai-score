@@ -79,13 +79,19 @@ def parse_jd_message(text: str) -> Optional[Dict[str, str]]:
         return None
 
     header = lines[0].strip()
+    test_match = re.match(r"(?i)^#\s*jd(?:\s*-\s*|\s+)test\b(?:\s*[:\-|]\s*|\s+)?(.*)$", header)
+    if test_match:
+        jd_name = (test_match.group(1) or "").strip()
+        jd_text = extract_jd_text(text)
+        return {"jd_name": jd_name, "jd_text": jd_text, "jd_test_mode": "true"}
+
     match = re.match(r"(?i)^#\s*jd\b(?:\s*[:\-|]\s*|\s+)?(.*)$", header)
-    if not match:
+    if match is None:
         return None
 
     jd_name = (match.group(1) or "").strip()
     jd_text = extract_jd_text(text)
-    return {"jd_name": jd_name, "jd_text": jd_text}
+    return {"jd_name": jd_name, "jd_text": jd_text, "jd_test_mode": "false"}
 
 
 def verify_slack_signature(signing_secret: str, timestamp: str, signature: str, body: bytes) -> bool:
@@ -166,6 +172,7 @@ async def slack_events(request: Request):
     if jd_payload is not None:
         jd_text = jd_payload["jd_text"]
         jd_name = jd_payload.get("jd_name", "")
+        jd_test_mode = str(jd_payload.get("jd_test_mode", "false")).strip().lower() == "true"
         if not jd_text:
             return JSONResponse({"ok": True, "ignored": "empty_jd"})
         workflow_name = "jd_pipeline"
@@ -173,6 +180,7 @@ async def slack_events(request: Request):
         job_payload = {
             "jd_text": jd_text,
             "jd_name": jd_name,
+            "jd_test_mode": jd_test_mode,
             "message_ts": message_ts,
             "channel_id": channel_id,
             "event_id": event_id,

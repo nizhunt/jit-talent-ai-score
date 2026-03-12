@@ -42,10 +42,17 @@ def _jd_prefix(jd_name: Optional[str]) -> str:
     return f"[{name}] "
 
 
-def build_pipeline_args(channel_id: str, jd_name: Optional[str] = None) -> argparse.Namespace:
+def build_pipeline_args(
+    channel_id: str,
+    jd_name: Optional[str] = None,
+    jd_test_mode: bool = False,
+) -> argparse.Namespace:
     args = parse_args([])
     args.channel_id = channel_id
     args.jd_name = (jd_name or "").strip()
+    args.jd_test_mode = bool(jd_test_mode)
+    if args.jd_test_mode:
+        args.num_results_per_query = 100
     args.debug = False
     args.stop_after = None
 
@@ -142,6 +149,7 @@ def process_jd_pipeline_job(
     message_ts: Optional[str],
     channel_id: str,
     jd_name: Optional[str] = None,
+    jd_test_mode: bool = False,
     event_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     load_dotenv()
@@ -155,12 +163,15 @@ def process_jd_pipeline_job(
     post_slack_message(
         slack_token=slack_token,
         channel_id=channel_id,
-        text=f"{_jd_prefix(jd_name)}Thanks for sharing the JD. Processing has started.",
+        text=(
+            f"{_jd_prefix(jd_name)}Thanks for sharing the JD. Processing has started."
+            + (" (test mode: direct JD query, max 100 results)." if jd_test_mode else "")
+        ),
     )
 
     try:
         client = OpenAI(api_key=openai_api_key)
-        args = build_pipeline_args(channel_id=channel_id, jd_name=jd_name)
+        args = build_pipeline_args(channel_id=channel_id, jd_name=jd_name, jd_test_mode=jd_test_mode)
         run_dir = getattr(args, "run_dir", None)
         result = run_pipeline_from_jd_text(
             jd_text=jd_text,
@@ -179,7 +190,13 @@ def process_jd_pipeline_job(
             )
         except Exception as exc:
             print(f"[warn] dashboard JD logging failed: {exc}")
-        return {"ok": True, "event_id": event_id, "jd_name": jd_name, "result": result}
+        return {
+            "ok": True,
+            "event_id": event_id,
+            "jd_name": jd_name,
+            "jd_test_mode": bool(jd_test_mode),
+            "result": result,
+        }
     except Exception as exc:
         _notify_failure(channel_id=channel_id, error_msg=str(exc), event_id=event_id, jd_name=jd_name)
         raise  # Re-raise so RQ marks the job as failed

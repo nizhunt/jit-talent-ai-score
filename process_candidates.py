@@ -41,6 +41,8 @@ DEFAULT_EXA_RETRY_BASE_DELAY_SECONDS = 2.0
 MAX_EXA_RETRY_DELAY_SECONDS = 20.0
 DEFAULT_SCORING_CONCURRENT_CALLS = 24
 DEFAULT_SCORING_INFLIGHT_FACTOR = 2
+JD_TEST_MAX_RESULTS = 100
+JD_TEST_PROMPT_FILENAME = "1-original.md"
 
 BASE_CSV_FIRST_COLUMNS = [
     "first_name",
@@ -326,6 +328,7 @@ def fetch_latest_jd_from_slack(
     slack_token: str,
     channel_id: str,
     max_messages: int = 500,
+    allow_test_header: bool = False,
 ) -> Tuple[str, Dict[str, Any]]:
     headers = {"Authorization": f"Bearer {slack_token}"}
     cursor: Optional[str] = None
@@ -364,7 +367,12 @@ def fetch_latest_jd_from_slack(
             if not lines:
                 continue
 
-            if lines[0].strip().lower() == "# jd":
+            header = lines[0].strip()
+            if header.lower() == "# jd":
+                jd_text = "\\n".join(lines[1:]).strip()
+                if jd_text:
+                    return jd_text, message
+            if allow_test_header and re.match(r"(?i)^#\s*jd(?:\s*-\s*|\s+)test\b", header):
                 jd_text = "\\n".join(lines[1:]).strip()
                 if jd_text:
                     return jd_text, message
@@ -375,7 +383,8 @@ def fetch_latest_jd_from_slack(
             break
 
     raise RuntimeError(
-        "No JD message found. Expected a message in the channel with first line exactly '# JD'."
+        "No JD message found. Expected a message with first line '# JD'"
+        + (" or '# JD-Test'." if allow_test_header else ".")
     )
 
 
@@ -1440,11 +1449,14 @@ def run_pipeline_from_jd_text(
     pipeline_start = time.monotonic()
     jd_name = normalize_whitespace(str(getattr(args, "jd_name", "") or ""))
     jd_label = format_jd_label(jd_name)
+    jd_test_mode = bool(getattr(args, "jd_test_mode", False))
     removed_legacy_logs = cleanup_legacy_exa_query_logs()
     if removed_legacy_logs:
         print(f"Removed {removed_legacy_logs} legacy Exa query log file(s).")
 
-    exa_query_prompt_template = read_text_file(args.exa_query_prompt_path)
+    exa_query_prompt_template = ""
+    if not jd_test_mode:
+        exa_query_prompt_template = read_text_file(args.exa_query_prompt_path)
     scorer_prompt_template = read_text_file(args.scorer_prompt_path)
 
     write_text_file(args.jd_path, jd_text)
@@ -1452,9 +1464,6 @@ def run_pipeline_from_jd_text(
 
     # --- Stage: widen JD, generate queries, search Exa, and flatten — in batches ---
     debug_pause(args.debug, "generate_queries")
-
-    widening_prompts = load_widening_prompts(args.jd_widening_prompts_dir)
-    print(f"Loaded {len(widening_prompts)} JD-widening prompts.")
 
     all_queries: List[str] = []
     batch_csv_paths: List[str] = []
@@ -1464,55 +1473,96 @@ def run_pipeline_from_jd_text(
     os.makedirs(batch_dir, exist_ok=True)
     total_query_gen_usage: Dict[str, int] = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
     jd_context_by_prompt_file: Dict[str, str] = {}
+    if jd_test_mode:
+        profile = jd_text.strip()
+        if not profile:
+            raise RuntimeError("JD test mode requires non-empty JD text.")
+        test_prompt_filename = JD_TEST_PROMPT_FILENAME
+        jd_context_by_prompt_file[test_prompt_filename] = profile
 
-    for wp_idx, (wp_name, wp_text, wp_filename) in enumerate(widening_prompts, start=1):
-        print(f"\n[{wp_idx}/{len(widening_prompts)}] Widening JD with '{wp_name}'...")
-        profile, widen_usage = widen_jd(
-            client=client,
-            jd_text=jd_text,
-            widening_prompt=wp_text,
-            prompt_name=wp_name,
-            model=args.model,
+        queries = [profile]
+        print(
+            "JD test mode enabled: skipping widening/query generation and using the raw JD text "
+            f"as the only Exa query (max {JD_TEST_MAX_RESULTS} results)."
         )
-        for key in total_query_gen_usage:
-            total_query_gen_usage[key] += int(widen_usage.get(key, 0))
-        jd_context_by_prompt_file[wp_filename] = profile
-
-        queries, qgen_usage = generate_exa_queries(
-            client=client,
-            structured_profile=profile,
-            exa_query_prompt_template=exa_query_prompt_template,
-            model=args.model,
-        )
-        for key in total_query_gen_usage:
-            total_query_gen_usage[key] += int(qgen_usage.get(key, 0))
-
-        print(f"  Generated {len(queries)} exa queries for '{wp_name}'.")
         all_queries.extend(queries)
 
-        # Run Exa searches for this batch, flatten, and write to a temp CSV immediately.
         batch_result = run_exa_fanout(
             exa_api_key=exa_api_key,
             queries=queries,
-            num_results_per_query=args.num_results_per_query,
+            num_results_per_query=JD_TEST_MAX_RESULTS,
         )
         batch_items = batch_result.get("results", [])
+        if len(batch_items) > JD_TEST_MAX_RESULTS:
+            batch_items = batch_items[:JD_TEST_MAX_RESULTS]
+            print(f"  JD test mode: truncating sourced profiles to {JD_TEST_MAX_RESULTS}.")
         total_exa_results += len(batch_items)
 
         batch_rows = flatten_exa_results_to_rows(
             batch_items,
-            expansion_prompt_file=wp_filename,
+            expansion_prompt_file=test_prompt_filename,
             widened_jd_context=profile,
         )
-        batch_csv = os.path.join(batch_dir, f"batch-{wp_idx}.csv")
+        batch_csv = os.path.join(batch_dir, "batch-1.csv")
         pd.DataFrame(batch_rows).to_csv(batch_csv, index=False)
         batch_csv_paths.append(batch_csv)
         total_csv_rows += len(batch_rows)
         print(f"  Exa batch: {len(batch_items)} results -> {len(batch_rows)} rows (written to disk, {total_csv_rows} total)")
 
-        # Free all batch data before the next iteration.
         del batch_result, batch_items, batch_rows
         gc.collect()
+    else:
+        widening_prompts = load_widening_prompts(args.jd_widening_prompts_dir)
+        print(f"Loaded {len(widening_prompts)} JD-widening prompts.")
+
+        for wp_idx, (wp_name, wp_text, wp_filename) in enumerate(widening_prompts, start=1):
+            print(f"\n[{wp_idx}/{len(widening_prompts)}] Widening JD with '{wp_name}'...")
+            profile, widen_usage = widen_jd(
+                client=client,
+                jd_text=jd_text,
+                widening_prompt=wp_text,
+                prompt_name=wp_name,
+                model=args.model,
+            )
+            for key in total_query_gen_usage:
+                total_query_gen_usage[key] += int(widen_usage.get(key, 0))
+            jd_context_by_prompt_file[wp_filename] = profile
+
+            queries, qgen_usage = generate_exa_queries(
+                client=client,
+                structured_profile=profile,
+                exa_query_prompt_template=exa_query_prompt_template,
+                model=args.model,
+            )
+            for key in total_query_gen_usage:
+                total_query_gen_usage[key] += int(qgen_usage.get(key, 0))
+
+            print(f"  Generated {len(queries)} exa queries for '{wp_name}'.")
+            all_queries.extend(queries)
+
+            # Run Exa searches for this batch, flatten, and write to a temp CSV immediately.
+            batch_result = run_exa_fanout(
+                exa_api_key=exa_api_key,
+                queries=queries,
+                num_results_per_query=args.num_results_per_query,
+            )
+            batch_items = batch_result.get("results", [])
+            total_exa_results += len(batch_items)
+
+            batch_rows = flatten_exa_results_to_rows(
+                batch_items,
+                expansion_prompt_file=wp_filename,
+                widened_jd_context=profile,
+            )
+            batch_csv = os.path.join(batch_dir, f"batch-{wp_idx}.csv")
+            pd.DataFrame(batch_rows).to_csv(batch_csv, index=False)
+            batch_csv_paths.append(batch_csv)
+            total_csv_rows += len(batch_rows)
+            print(f"  Exa batch: {len(batch_items)} results -> {len(batch_rows)} rows (written to disk, {total_csv_rows} total)")
+
+            # Free all batch data before the next iteration.
+            del batch_result, batch_items, batch_rows
+            gc.collect()
 
     queries_count = len(all_queries)
     print(f"\nTotal exa queries: {queries_count}, total rows: {total_csv_rows}")
@@ -1685,6 +1735,7 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument("--stop-after", choices=STAGES, default=None)
     parser.add_argument("--model", default="gpt-5-mini", help="Model for JD widening and query generation")
     parser.add_argument("--scorer-model", default="gpt-5-mini", help="Model for candidate scoring (supports structured output)")
+    parser.add_argument("--jd-test-mode", action="store_true", help="Use original JD only, one Exa query, and max 100 sourced profiles")
     parser.add_argument("--max-messages", type=int, default=500)
 
     parser.add_argument("--jd-path", default="jd.md")
@@ -1718,6 +1769,7 @@ def main() -> None:
             slack_token=slack_token,
             channel_id=args.channel_id,
             max_messages=args.max_messages,
+            allow_test_header=bool(getattr(args, "jd_test_mode", False)),
         )
         print(f"Fetched JD from Slack message ts={jd_message.get('ts')}")
         maybe_stop(args.stop_after, "fetch_jd")
