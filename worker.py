@@ -246,7 +246,7 @@ def process_jd_pipeline_job(
         channel_id=channel_id,
         text=(
             f"{_jd_prefix(jd_name)}Thanks for sharing the JD. Processing has started."
-            + (" (test mode: direct JD query, max 100 results)." if jd_test_mode else "")
+            + (" (quick mode: direct JD query, max 100 results)." if jd_test_mode else "")
         ),
     )
 

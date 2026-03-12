@@ -79,9 +79,12 @@ def parse_jd_message(text: str) -> Optional[Dict[str, str]]:
         return None
 
     header = lines[0].strip()
-    test_match = re.match(r"(?i)^#\s*jd(?:\s*-\s*|\s+)test\b(?:\s*[:\-|]\s*|\s+)?(.*)$", header)
-    if test_match:
-        jd_name = (test_match.group(1) or "").strip()
+    quick_match = re.match(
+        r"(?i)^#\s*jd(?:\s*-\s*|\s+)(?:quick|test)\b(?:\s*[:\-|]\s*|\s+)?(.*)$",
+        header,
+    )
+    if quick_match:
+        jd_name = (quick_match.group(1) or "").strip()
         jd_text = extract_jd_text(text)
         return {"jd_name": jd_name, "jd_text": jd_text, "jd_test_mode": "true"}
 

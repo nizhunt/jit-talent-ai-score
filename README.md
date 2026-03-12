@@ -33,6 +33,7 @@ Supported header formats:
 - `# JD: <name>` and `# JD | <name>` are also accepted
 - `# JD-Quick` (low-cost test mode)
 - `# JD-Quick <name>` and `# JD-Quick: <name>` are also accepted
+- `# JD-Test` variants are still accepted as a legacy alias
 
 `# JD-Quick` behavior:
 - skips widening/query-generation and sends the raw JD text directly as the only Exa query
