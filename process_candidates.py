@@ -1808,6 +1808,7 @@ def run_pipeline_from_jd_text(
     google_sheet_write_result = write_dataframe_to_google_sheet(
         spreadsheet_id=google_sheet["spreadsheet_id"],
         df=sheet_ready_df,
+        hidden_column_names=["Profile Text"],
     )
     google_sheet["spreadsheet_title"] = (
         google_sheet_write_result.get("spreadsheet_title") or google_sheet.get("spreadsheet_title")

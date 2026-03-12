@@ -130,7 +130,7 @@ def _normalize_cell_value(value: Any) -> Any:
 def _get_spreadsheet_metadata(sheets: Any, spreadsheet_id: str) -> Dict[str, Any]:
     metadata = (
         sheets.spreadsheets()
-        .get(spreadsheetId=spreadsheet_id, fields="properties/title,sheets/properties/title")
+        .get(spreadsheetId=spreadsheet_id, fields="properties/title,sheets/properties(title,sheetId)")
         .execute()
     )
     spreadsheet_title = ((metadata.get("properties") or {}).get("title") or "").strip()
@@ -138,15 +138,22 @@ def _get_spreadsheet_metadata(sheets: Any, spreadsheet_id: str) -> Dict[str, Any
     if not sheets_meta:
         raise RuntimeError("Google Sheet has no worksheets.")
     tab_titles: List[str] = []
+    tab_ids_by_title: Dict[str, int] = {}
     for item in sheets_meta:
-        title = ((item or {}).get("properties") or {}).get("title")
+        properties = (item or {}).get("properties") or {}
+        title = properties.get("title")
         if title:
-            tab_titles.append(str(title))
+            clean_title = str(title)
+            tab_titles.append(clean_title)
+            sheet_id = properties.get("sheetId")
+            if isinstance(sheet_id, int):
+                tab_ids_by_title[clean_title] = sheet_id
     if not tab_titles:
         raise RuntimeError("Google Sheet has no worksheets.")
     return {
         "spreadsheet_title": spreadsheet_title,
         "tab_titles": tab_titles,
+        "tab_ids_by_title": tab_ids_by_title,
     }
 
 
@@ -240,6 +247,55 @@ def _to_sheet_values(df: pd.DataFrame) -> List[List[Any]]:
     return rows
 
 
+def _hide_columns_by_header_name(
+    *,
+    sheets: Any,
+    spreadsheet_id: str,
+    sheet_id: int,
+    headers: List[str],
+    hidden_column_names: List[str],
+) -> None:
+    if not hidden_column_names or not headers:
+        return
+
+    target_names = {str(name).strip().lower() for name in hidden_column_names if str(name).strip()}
+    if not target_names:
+        return
+
+    indexes_to_hide: List[int] = []
+    for idx, header in enumerate(headers):
+        if str(header).strip().lower() in target_names:
+            indexes_to_hide.append(idx)
+
+    if not indexes_to_hide:
+        return
+
+    requests = [
+        {
+            "updateDimensionProperties": {
+                "range": {
+                    "sheetId": sheet_id,
+                    "dimension": "COLUMNS",
+                    "startIndex": idx,
+                    "endIndex": idx + 1,
+                },
+                "properties": {"hiddenByUser": True},
+                "fields": "hiddenByUser",
+            }
+        }
+        for idx in sorted(set(indexes_to_hide))
+    ]
+
+    (
+        sheets.spreadsheets()
+        .batchUpdate(
+            spreadsheetId=spreadsheet_id,
+            body={"requests": requests},
+        )
+        .execute()
+    )
+
+
 def _move_file_to_folder(drive: Any, file_id: str, folder_id: str) -> None:
     metadata = (
         drive.files()
@@ -294,6 +350,7 @@ def create_google_sheet_from_dataframe(
     workspace_domain: str,
     domain_role: str = "writer",
     worksheet_title: str = "Candidates",
+    hidden_column_names: Optional[List[str]] = None,
 ) -> Dict[str, str]:
     created_sheet = create_google_sheet_placeholder(
         spreadsheet_title=spreadsheet_title,
@@ -306,6 +363,7 @@ def create_google_sheet_from_dataframe(
         spreadsheet_id=created_sheet["spreadsheet_id"],
         df=df,
         worksheet_title=worksheet_title,
+        hidden_column_names=hidden_column_names,
     )
     created_sheet["spreadsheet_title"] = write_result.get("spreadsheet_title") or created_sheet["spreadsheet_title"]
     created_sheet["worksheet_title"] = write_result.get("worksheet_title") or worksheet_title
@@ -378,6 +436,7 @@ def write_dataframe_to_google_sheet(
     spreadsheet_id: str,
     df: pd.DataFrame,
     worksheet_title: str = "Candidates",
+    hidden_column_names: Optional[List[str]] = None,
 ) -> Dict[str, str]:
     clients = _build_google_clients()
     sheets = clients["sheets"]
@@ -397,6 +456,7 @@ def write_dataframe_to_google_sheet(
     except HttpError as exc:
         _raise_google_http_error(f"ensure worksheet '{worksheet_title}' exists", exc)
     values = _to_sheet_values(df)
+    headers: List[str] = [str(h) for h in values[0]] if values else []
     try:
         (
             sheets.spreadsheets()
@@ -411,6 +471,23 @@ def write_dataframe_to_google_sheet(
         )
     except HttpError as exc:
         _raise_google_http_error(f"write candidate rows into spreadsheet '{spreadsheet_id}'", exc)
+
+    if hidden_column_names:
+        tab_id = (metadata.get("tab_ids_by_title") or {}).get(tab_name)
+        if isinstance(tab_id, int):
+            try:
+                _hide_columns_by_header_name(
+                    sheets=sheets,
+                    spreadsheet_id=spreadsheet_id,
+                    sheet_id=tab_id,
+                    headers=headers,
+                    hidden_column_names=hidden_column_names,
+                )
+            except HttpError as exc:
+                _raise_google_http_error(
+                    f"hide configured columns in worksheet '{tab_name}' for spreadsheet '{spreadsheet_id}'",
+                    exc,
+                )
 
     return {
         "spreadsheet_id": spreadsheet_id,
