@@ -313,14 +313,42 @@ def _get_thread_root_message(slack_token: str, channel_id: str, thread_ts: str) 
 
 
 def _extract_jd_name_from_message(message: Dict[str, Any]) -> str:
-    text = (message.get("text") or "").strip()
+    for part in _collect_thread_root_text_parts(message):
+        jd_name = _extract_jd_name_from_text(part)
+        if jd_name:
+            return jd_name
+    return ""
+
+
+def _clean_extracted_jd_name(value: str) -> str:
+    cleaned = (value or "").strip()
+    if not cleaned:
+        return ""
+    cleaned = re.sub(r"^[`*_]+|[`*_]+$", "", cleaned).strip()
+    if cleaned.lower() in {"n/a", "na", "none", "null", "-", "(none)"}:
+        return ""
+    return cleaned
+
+
+def _extract_jd_name_from_text(text: str) -> str:
     if not text:
         return ""
 
-    match = re.search(r"(?im)^JD Name:\s*(.+?)\s*$", text)
-    if not match:
-        return ""
-    return (match.group(1) or "").strip()
+    raw_lines = [line.strip() for line in text.splitlines() if line and line.strip()]
+    for idx, line in enumerate(raw_lines):
+        explicit_line = re.match(r"(?i)^JD Name\s*:\s*(.+)\s*$", line)
+        if explicit_line:
+            candidate = _clean_extracted_jd_name(explicit_line.group(1))
+            if candidate:
+                return candidate
+
+        normalized_label = re.sub(r"[*_`]+", "", line).strip().lower()
+        if normalized_label == "jd name" and idx + 1 < len(raw_lines):
+            candidate = _clean_extracted_jd_name(raw_lines[idx + 1])
+            if candidate:
+                return candidate
+
+    return ""
 
 
 def _collect_text_values(value: Any, out: List[str]) -> None:
@@ -333,6 +361,8 @@ def _collect_text_values(value: Any, out: List[str]) -> None:
         for key, nested in value.items():
             # Slack block payloads often keep useful text in `text`/`fallback` fields.
             if key in {"text", "fallback", "pretext", "title", "comment"}:
+                _collect_text_values(nested, out)
+            elif key in {"fields", "elements", "blocks", "attachments", "initial_comment"}:
                 _collect_text_values(nested, out)
         return
     if isinstance(value, list):
