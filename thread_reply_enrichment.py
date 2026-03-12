@@ -24,23 +24,22 @@ INSTANTLY_CAMPAIGN_CREATE_URL = "https://api.instantly.ai/api/v2/campaigns"
 INSTANTLY_LEAD_CREATE_URL = "https://api.instantly.ai/api/v2/leads"
 INSTANTLY_STEP_ONE_SUBJECT = "New role at a startup!"
 INSTANTLY_STEP_ONE_BODY = (
-    "<p>Hi {{firstName}},</p>"
-    "<p>{{personalization}}</p>"
-    "<p>Do you have a few minutes this week? Great to share more</p>"
-    "<p>Best,<br />Dan<br />CEO and Co-founder, Calyptus</p>"
+    "Hi {{firstName}},<br /><br />"
+    "{{personalization}}<br /><br />"
+    "Do you have a few minutes this week? Great to share more<br />"
+    "Best,<br />Dan<br />CEO and Co-founder, Calyptus"
 )
 INSTANTLY_STEP_TWO_BODY = (
-    "<p>Following up here as the team are moving fast, and you have a fantastic profile.</p>"
-    "<p>Would you be open to chat?</p>"
-    "<p>Love to connect you with Dianmarie, our senior recruiter who is leading the process!</p>"
-    "<p>Best,<br />Dan<br />CEO and Co-founder, Calyptus</p>"
+    "Following up here as the team are moving fast, and you have a fantastic profile.<br />"
+    "Would you be open to chat?<br /><br />"
+    "Love to connect you with Dianmarie, our senior recruiter who is leading the process!<br /><br />"
+    "Best,<br />Dan<br />CEO and Co-founder, Calyptus"
 )
 INSTANTLY_STEP_THREE_BODY = (
-    "<p>Final follow up from me {{firstName}}</p>"
-    "<p>If this role is not of interest but you want to be kept updated with other roles at top tech startups, "
-    "coming out of a16z or Antler, then let us know.</p>"
-    "<p>Our team would love to chat.</p>"
-    "<p>All the best,<br />Dan<br />CEO and Co-founder, Calyptus</p>"
+    "Following up here as the team are moving fast, and you have a fantastic profile.<br /><br />"
+    "Would you be open to chat?<br /><br />"
+    "Love to connect you with Dianmarie, our senior recruiter who is leading the process!<br /><br />"
+    "Best,<br />Dan<br />CEO and Co-founder, Calyptus"
 )
 
 RESULT_MESSAGE_PREFIX_DEFAULT = "AI-scored candidates sheet for this JD"
