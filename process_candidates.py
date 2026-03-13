@@ -1677,6 +1677,40 @@ def _chunk_markdown_lines(lines: List[str], max_chars: int = 2800) -> List[str]:
     return chunks
 
 
+def _chunk_plain_text(text: str, max_chars: int = 2800) -> List[str]:
+    normalized = (text or "").replace("\r\n", "\n").replace("\r", "\n")
+    if not normalized:
+        return []
+
+    chunks: List[str] = []
+    current: List[str] = []
+    current_len = 0
+
+    for line in normalized.split("\n"):
+        if len(line) > max_chars:
+            if current:
+                chunks.append("\n".join(current))
+                current = []
+                current_len = 0
+            for idx in range(0, len(line), max_chars):
+                chunks.append(line[idx : idx + max_chars])
+            continue
+
+        line_len = len(line) + (1 if current else 0)
+        if current and current_len + line_len > max_chars:
+            chunks.append("\n".join(current))
+            current = [line]
+            current_len = len(line)
+            continue
+
+        current.append(line)
+        current_len += line_len
+
+    if current:
+        chunks.append("\n".join(current))
+    return chunks
+
+
 def _linkedin_display_label(url: str) -> str:
     parsed = urlsplit(url)
     if not parsed.netloc:
@@ -1768,6 +1802,7 @@ def build_scored_result_blocks(
     *,
     result_prefix: str,
     jd_name: str,
+    original_jd_text: str,
     google_sheet_url: str,
     rows_scored: int,
     qualified_finds: int,
@@ -1796,8 +1831,15 @@ def build_scored_result_blocks(
             "type": "section",
             "text": {"type": "mrkdwn", "text": f"*Google Sheet*\n<{google_sheet_url}|Open scored candidates sheet>"},
         },
-        {"type": "divider"},
     ]
+
+    jd_chunks = _chunk_plain_text((original_jd_text or "").strip(), max_chars=2800)
+    if jd_chunks:
+        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": "*Original JD*"}})
+        for chunk in jd_chunks:
+            blocks.append({"type": "section", "text": {"type": "plain_text", "text": chunk, "emoji": False}})
+
+    blocks.append({"type": "divider"})
 
     tally_lines = score_tally_lines or ["  (no scores)"]
     tally_text = "\n".join(tally_lines)
@@ -2084,6 +2126,7 @@ def run_source_stage_from_jd_text(
 
     return {
         "jd_name": jd_name,
+        "jd_text": jd_text,
         "jd_test_mode": jd_test_mode,
         "queries": list(all_queries),
         "queries_count": queries_count,
@@ -2106,6 +2149,12 @@ def run_score_stage_from_handoff(
 ) -> Dict[str, Any]:
     score_stage_start = time.monotonic()
     jd_name = normalize_whitespace(str(source_stage_result.get("jd_name") or getattr(args, "jd_name", "") or ""))
+    original_jd_text = (source_stage_result.get("jd_text") or "").strip()
+    if not original_jd_text:
+        try:
+            original_jd_text = read_text_file(args.jd_path).strip()
+        except Exception:
+            original_jd_text = ""
     jd_label = format_jd_label(jd_name)
     scorer_prompt_template = read_text_file(args.scorer_prompt_path)
     total_query_gen_usage = dict(source_stage_result.get("query_generation_usage") or {})
@@ -2230,6 +2279,7 @@ def run_score_stage_from_handoff(
     result_message_blocks = build_scored_result_blocks(
         result_prefix=result_prefix,
         jd_name=jd_name,
+        original_jd_text=original_jd_text,
         google_sheet_url=google_sheet_url,
         rows_scored=rows_scored,
         qualified_finds=qualified_finds,

@@ -439,6 +439,8 @@ def _download_score_handoff_artifacts(
     _assert_required_handoff_artifacts(bucket=bucket, artifact_keys=artifact_keys)
     bucket.download_file(artifact_keys["jd_text"], args.jd_path)
     bucket.download_file(artifact_keys["dedup_csv"], args.dedup_csv)
+    with open(args.jd_path, "r", encoding="utf-8") as handle:
+        jd_text = handle.read()
     jd_context = bucket.download_json(artifact_keys["jd_context_by_prompt"])
     queries = bucket.download_json(artifact_keys["queries"])
     meta = bucket.download_json(artifact_keys["meta"])
@@ -449,6 +451,7 @@ def _download_score_handoff_artifacts(
     if not isinstance(meta, dict):
         raise RuntimeError("Invalid meta artifact: expected JSON object.")
     return {
+        "jd_text": jd_text,
         "jd_context_by_prompt_file": jd_context,
         "queries": queries,
         "meta": meta,
@@ -746,6 +749,7 @@ def process_jd_score_job(
 
         source_stage_result = {
             "jd_name": resolved_jd_name,
+            "jd_text": handoff.get("jd_text") or "",
             "jd_test_mode": bool(meta.get("jd_test_mode", jd_test_mode)),
             "queries": handoff.get("queries") or [],
             "queries_count": int(meta.get("queries_count") or len(handoff.get("queries") or [])),
