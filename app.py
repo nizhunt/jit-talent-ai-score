@@ -15,6 +15,7 @@ from fastapi.staticfiles import StaticFiles
 from queueing import (
     QueueingUnavailableError,
     clear_event_seen,
+    enqueue_jd_admin_job,
     enqueue_jd_pipeline_job,
     enqueue_thread_reply_enrichment_job,
     mark_event_seen,
@@ -95,6 +96,43 @@ def parse_jd_message(text: str) -> Optional[Dict[str, str]]:
     jd_name = (match.group(1) or "").strip()
     jd_text = extract_jd_text(text)
     return {"jd_name": jd_name, "jd_text": jd_text, "jd_test_mode": "false"}
+
+
+def parse_admin_command(text: str) -> Optional[Dict[str, Any]]:
+    lines = text.splitlines()
+    if not lines:
+        return None
+    header = lines[0].strip()
+
+    list_match = re.match(r"(?i)^#\s*jd(?:\s*-\s*|\s+)runs(?:\s+(\d+))?\s*$", header)
+    if list_match:
+        limit_raw = list_match.group(1)
+        limit = int(limit_raw) if limit_raw else 20
+        limit = max(1, min(limit, 100))
+        return {"action": "list_runs", "limit": limit}
+
+    run_match = re.match(r"(?i)^#\s*jd(?:\s*-\s*|\s+)run\s+([A-Za-z0-9_-]+)\s*$", header)
+    if run_match:
+        return {"action": "show_run", "run_id": run_match.group(1)}
+
+    retry_match = re.match(r"(?i)^#\s*jd(?:\s*-\s*|\s+)retry\s+([A-Za-z0-9_-]+)\s*$", header)
+    if retry_match:
+        return {"action": "retry_score", "run_id": retry_match.group(1)}
+
+    cleanup_match = re.match(
+        r"(?i)^#\s*jd(?:\s*-\s*|\s+)cleanup(?:\s+([0-9]+(?:\.[0-9]+)?))?(?:\s+(confirm))?\s*$",
+        header,
+    )
+    if cleanup_match:
+        hours_raw = cleanup_match.group(1)
+        hours = float(hours_raw) if hours_raw else 24.0
+        if hours <= 0:
+            hours = 24.0
+        confirm_token = (cleanup_match.group(2) or "").strip().lower()
+        dry_run = confirm_token != "confirm"
+        return {"action": "cleanup_runs", "hours": hours, "dry_run": dry_run}
+
+    return None
 
 
 def verify_slack_signature(signing_secret: str, timestamp: str, signature: str, body: bytes) -> bool:
@@ -188,21 +226,33 @@ async def slack_events(request: Request):
             "channel_id": channel_id,
             "event_id": event_id,
         }
-    elif is_thread_reply:
-        threshold = parse_threshold_from_text(text)
-        if threshold is None:
-            return JSONResponse({"ok": True, "ignored": "thread_reply_missing_threshold"})
-        workflow_name = "thread_reply_enrichment"
-        enqueue_fn = enqueue_thread_reply_enrichment_job
-        job_payload = {
-            "channel_id": channel_id,
-            "thread_ts": thread_ts,
-            "reply_ts": message_ts,
-            "threshold": threshold,
-            "event_id": event_id,
-        }
     else:
-        return JSONResponse({"ok": True, "ignored": "not_jd_or_thread_reply"})
+        admin_command = parse_admin_command(text)
+        if admin_command is not None:
+            workflow_name = "jd_admin"
+            enqueue_fn = enqueue_jd_admin_job
+            job_payload = {
+                "channel_id": channel_id,
+                "message_ts": message_ts,
+                "user_id": event.get("user", ""),
+                "event_id": event_id,
+                "command": admin_command,
+            }
+        elif is_thread_reply:
+            threshold = parse_threshold_from_text(text)
+            if threshold is None:
+                return JSONResponse({"ok": True, "ignored": "thread_reply_missing_threshold"})
+            workflow_name = "thread_reply_enrichment"
+            enqueue_fn = enqueue_thread_reply_enrichment_job
+            job_payload = {
+                "channel_id": channel_id,
+                "thread_ts": thread_ts,
+                "reply_ts": message_ts,
+                "threshold": threshold,
+                "event_id": event_id,
+            }
+        else:
+            return JSONResponse({"ok": True, "ignored": "not_supported_message"})
 
     dedup_enabled = _is_truthy(os.getenv("SLACK_EVENT_DEDUP_ENABLED"), default=True)
     event_marked_seen = False

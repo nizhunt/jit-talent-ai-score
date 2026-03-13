@@ -202,6 +202,16 @@ class S3BucketClient:
             return f"{self.config.key_prefix}/{cleaned_key}"
         return cleaned_key
 
+    def _strip_config_prefix(self, full_key: str) -> str:
+        key = str(full_key or "").strip().lstrip("/")
+        if not key:
+            return ""
+        if self.config.key_prefix:
+            prefix = f"{self.config.key_prefix}/"
+            if key.startswith(prefix):
+                return key[len(prefix) :]
+        return key
+
     def _run_with_retries(self, operation: str, key: str, fn: Callable[[], T]) -> T:
         max_attempts = max(1, int(self.config.max_attempts))
         for attempt in range(1, max_attempts + 1):
@@ -309,6 +319,36 @@ class S3BucketClient:
             if _not_found_error(exc):
                 return False
             raise
+
+    def list_keys(self, prefix: str) -> list[str]:
+        full_prefix = self._full_key(prefix).rstrip("/") + "/"
+        keys: list[str] = []
+        continuation_token: Optional[str] = None
+
+        while True:
+            list_kwargs: Dict[str, Any] = {
+                "Bucket": self.config.bucket_name,
+                "Prefix": full_prefix,
+                "MaxKeys": 1000,
+            }
+            if continuation_token:
+                list_kwargs["ContinuationToken"] = continuation_token
+            response = self._run_with_retries(
+                "list",
+                full_prefix,
+                lambda: self._client.list_objects_v2(**list_kwargs),
+            )
+            contents = response.get("Contents") or []
+            for item in contents:
+                key = item.get("Key")
+                if key:
+                    keys.append(self._strip_config_prefix(str(key)))
+            if not response.get("IsTruncated"):
+                break
+            continuation_token = response.get("NextContinuationToken")
+
+        print(f"[bucket] listed prefix={full_prefix} key_count={len(keys)}")
+        return keys
 
     def delete_prefix(self, prefix: str) -> int:
         full_prefix = self._full_key(prefix).rstrip("/") + "/"

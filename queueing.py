@@ -9,6 +9,7 @@ from rq import Queue
 DEFAULT_JD_SOURCE_QUEUE_NAME = "jd-pipeline"
 DEFAULT_JD_SCORE_QUEUE_NAME = "jd-pipeline-score"
 DEFAULT_REPLY_QUEUE_NAME = "reply-enrichment"
+DEFAULT_ADMIN_QUEUE_NAME = "jd-admin"
 DEFAULT_EVENT_TTL_SECONDS = 60 * 60 * 24
 UPSTASH_LIMIT_ERROR_SNIPPET = "max requests limit exceeded"
 
@@ -51,6 +52,10 @@ def get_jd_queue_name() -> str:
 
 def get_reply_queue_name() -> str:
     return os.getenv("RQ_REPLY_QUEUE_NAME", DEFAULT_REPLY_QUEUE_NAME)
+
+
+def get_admin_queue_name() -> str:
+    return os.getenv("RQ_JD_ADMIN_QUEUE_NAME") or DEFAULT_ADMIN_QUEUE_NAME
 
 
 def get_queue_name() -> str:
@@ -200,5 +205,13 @@ def enqueue_thread_reply_enrichment_job(payload: Dict[str, Any]):
     return _enqueue_job(
         queue_name=get_reply_queue_name(),
         function_name="worker.process_thread_reply_enrichment_job",
+        payload=payload,
+    )
+
+
+def enqueue_jd_admin_job(payload: Dict[str, Any]):
+    return _enqueue_job(
+        queue_name=get_admin_queue_name(),
+        function_name="worker.process_jd_admin_job",
         payload=payload,
     )

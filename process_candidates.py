@@ -1859,6 +1859,7 @@ def post_slack_message(
     slack_token: str,
     channel_id: str,
     text: str,
+    thread_ts: Optional[str] = None,
     blocks: Optional[List[Dict[str, Any]]] = None,
     attachments: Optional[List[Dict[str, Any]]] = None,
     unfurl_links: Optional[bool] = None,
@@ -1872,6 +1873,8 @@ def post_slack_message(
         "channel": channel_id,
         "text": text,
     }
+    if thread_ts:
+        payload["thread_ts"] = thread_ts
     if blocks:
         payload["blocks"] = blocks
     if attachments:

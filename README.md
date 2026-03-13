@@ -37,6 +37,9 @@ Additional isolated workflow:
 
 ## JD Message Format
 
+Canonical command reference:
+- `SLACK_COMMANDS.md` (keep this updated whenever Slack command parsing changes)
+
 Supported header formats:
 - `# JD` (existing format)
 - `# JD <name>` (new, optional name)
@@ -56,31 +59,82 @@ When a name is provided, it is used in:
 - output CSV filenames inside the worker run (slugged)
 - Instantly campaign name during thread-reply enrichment
 
+## Slack Admin Commands
+
+In the configured Slack channel, you can trigger recovery/ops actions with:
+
+- `# JD-Runs` or `# JD-Runs 30` (list recent runs)
+- `# JD-Run <run_id>` (show details for one run)
+- `# JD-Retry <run_id>` (requeue score stage from bucket artifacts)
+- `# JD-Cleanup` or `# JD-Cleanup 24` (dry-run cleanup preview)
+- `# JD-Cleanup 24 confirm` (execute cleanup)
+
+Responses are posted in a thread under your command message.
+
+Full command behavior and examples:
+- `SLACK_COMMANDS.md`
+
 ## Bucket Artifact Layout
 
 Cross-job handoff artifacts are stored under `runs/{run_id}/...` (or `${PIPELINE_RUNS_PREFIX}/{run_id}/...`):
 
 - `runs/{run_id}/jd.txt`
+- `runs/{run_id}/candidates.csv`
 - `runs/{run_id}/dedup.csv`
 - `runs/{run_id}/jd_context_by_prompt.json`
 - `runs/{run_id}/queries.json`
 - `runs/{run_id}/meta.json`
+- `runs/{run_id}/scored.csv` (on successful score stage)
+- `runs/{run_id}/scored-partial.csv` (best-effort on score failures)
+- `runs/{run_id}/scored-sheet-ready.csv` (on successful score stage)
 
 Final-summary idempotency marker:
 
 - `runs/{run_id}/final_summary_posted.json`
 
-Cleanup helper:
+Cleanup helper (single run):
 
 ```bash
 python scripts/cleanup_bucket_runs.py --run-id <run_id>
 ```
 
-Or delete a custom prefix:
+Cleanup helper (custom prefix):
 
 ```bash
 python scripts/cleanup_bucket_runs.py --prefix runs/20260313-demo
 ```
+
+Cleanup helper (retention sweep):
+
+```bash
+python scripts/cleanup_bucket_runs.py --older-than-hours 24 --dry-run
+python scripts/cleanup_bucket_runs.py --older-than-hours 24
+```
+
+## Failure Recovery (Manual)
+
+List recent runs:
+
+```bash
+python scripts/list_bucket_runs.py --limit 20
+```
+
+Download all artifacts for a run:
+
+```bash
+python scripts/download_bucket_run.py --run-id <run_id> --output-dir ./bucket-runs
+```
+
+Manually restart score stage from existing run artifacts:
+
+```bash
+python scripts/requeue_score_from_run.py --run-id <run_id>
+```
+
+Notes:
+- `requeue_score_from_run.py` reads `channel_id`, `jd_name`, and `jd_test_mode` from `meta.json` by default.
+- Use `--channel-id`, `--jd-name`, or `--jd-test-mode true|false` to override.
+- This lets you recover without re-running Exa sourcing, as long as source-stage artifacts are still in bucket.
 
 ## Required Environment Variables
 
@@ -108,14 +162,17 @@ Optional:
 - `SLACK_CHANNEL_ID` (default `C0AF5RGPMEW`)
 - `RQ_JD_SOURCE_QUEUE_NAME` (default `jd-pipeline`)
 - `RQ_JD_SCORE_QUEUE_NAME` (default `jd-pipeline-score`)
+- `RQ_JD_ADMIN_QUEUE_NAME` (default `jd-admin`)
 - `RQ_JD_QUEUE_NAME` (legacy fallback for source queue)
 - `RQ_REPLY_QUEUE_NAME` (default `reply-enrichment`)
 - `RQ_QUEUE_NAME` (legacy fallback for JD queue name only)
-- `RQ_WORKER_QUEUE_TYPE` (default `source`; worker can consume `source`, `score`, `jd` (legacy source alias), `reply`, or `all`)
+- `RQ_WORKER_QUEUE_TYPE` (default `source`; worker can consume `source`, `score`, `jd` (legacy source alias), `reply`, `admin`, or `all`)
+- `SLACK_ADMIN_USER_IDS` (optional CSV of Slack user ids allowed to run admin commands; if unset, any user in the configured channel can run them)
 - `RQ_JOB_TIMEOUT` (default `7200`)
 - `RQ_WITH_SCHEDULER` (default `false`; keep disabled unless you use scheduled RQ jobs)
 - `RQ_STOP_ON_JOB_FAILURE` (default `true`; when a queued job fails, stop the worker before dequeuing the next job)
 - `PIPELINE_RUNS_PREFIX` (default `runs`; handoff root prefix)
+- `PIPELINE_ARTIFACT_RETENTION_HOURS` (default `24`; artifacts remain recoverable in bucket for at least this many hours)
 - `AWS_DEFAULT_REGION` (default `auto`)
 - `S3_ADDRESSING_STYLE` (default `virtual`; set `path` only if your Railway bucket credentials page requires path style)
 - `RAILWAY_BUCKET_KEY_PREFIX` (default empty; prepended to all object keys)
@@ -213,17 +270,20 @@ Dedicated workers:
 python worker.py --queue-type source
 python worker.py --queue-type score
 python worker.py --queue-type reply
+python worker.py --queue-type admin
 ```
 
 Recommended production shape:
 - run `2` source workers: `python worker.py --queue-type source`
 - run `1` score worker: `python worker.py --queue-type score`
 - run `1` reply worker: `python worker.py --queue-type reply`
+- run `1` admin worker: `python worker.py --queue-type admin`
 
 Queue topology:
 - `RQ_JD_SOURCE_QUEUE_NAME` -> `worker.process_jd_source_job`
 - `RQ_JD_SCORE_QUEUE_NAME` -> `worker.process_jd_score_job`
 - `RQ_REPLY_QUEUE_NAME` -> `worker.process_thread_reply_enrichment_job`
+- `RQ_JD_ADMIN_QUEUE_NAME` -> `worker.process_jd_admin_job`
 
 Railway expected commands:
 - Build: `pip install -r requirements.txt` (or leave default with `nixpacks.toml`)
@@ -233,6 +293,11 @@ Helper scripts committed in repo:
 - `./scripts/start-jd-worker.sh`
 - `./scripts/start-score-worker.sh`
 - `./scripts/start-reply-worker.sh`
+- `./scripts/start-admin-worker.sh`
+- `./scripts/list_bucket_runs.py`
+- `./scripts/download_bucket_run.py`
+- `./scripts/requeue_score_from_run.py`
+- `./scripts/cleanup_bucket_runs.py`
 
 For one-shot processing (CI/manual):
 
