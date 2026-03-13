@@ -16,14 +16,24 @@ Additional isolated workflow:
 - Vercel (`app.py`) only handles Slack Events API:
   - verifies Slack signature
   - filters channel + `# JD` format
-  - enqueues job to Redis/RQ
+  - enqueues source-stage job to Redis/RQ
   - returns fast `200` to Slack
 - Vercel function entrypoint file: `api/index.py` (re-exports `app` from `app.py`)
-- Dedicated worker (`worker.py`) runs heavy pipeline:
-  - generate 15 Exa prompts
-  - fetch Exa results
-  - CSV + dedup + score
-  - post step updates + final result summary + Google Sheet link to Slack
+- Dedicated workers (`worker.py`) run the heavy pipeline in two stages:
+  - Source job (`process_jd_source_job`):
+    - widen JD
+    - generate Exa queries
+    - fetch Exa results
+    - flatten/combine CSV
+    - deduplicate
+    - upload handoff artifacts to Railway Storage Bucket (S3-compatible)
+    - enqueue score job with lightweight payload (`run_id`, metadata)
+  - Score job (`process_jd_score_job`):
+    - download handoff artifacts by `run_id`
+    - score candidates
+    - write Google Sheet
+    - post final Slack summary
+    - dashboard logging
 
 ## JD Message Format
 
@@ -46,18 +56,46 @@ When a name is provided, it is used in:
 - output CSV filenames inside the worker run (slugged)
 - Instantly campaign name during thread-reply enrichment
 
+## Bucket Artifact Layout
+
+Cross-job handoff artifacts are stored under `runs/{run_id}/...` (or `${PIPELINE_RUNS_PREFIX}/{run_id}/...`):
+
+- `runs/{run_id}/jd.txt`
+- `runs/{run_id}/dedup.csv`
+- `runs/{run_id}/jd_context_by_prompt.json`
+- `runs/{run_id}/queries.json`
+- `runs/{run_id}/meta.json`
+
+Final-summary idempotency marker:
+
+- `runs/{run_id}/final_summary_posted.json`
+
+Cleanup helper:
+
+```bash
+python scripts/cleanup_bucket_runs.py --run-id <run_id>
+```
+
+Or delete a custom prefix:
+
+```bash
+python scripts/cleanup_bucket_runs.py --prefix runs/20260313-demo
+```
+
 ## Required Environment Variables
 
-Set these in both:
-- Vercel project env
-- Worker service env
-- (or locally in `.env`, starting from `.env.example`)
+Set these in worker service env (or locally in `.env`, starting from `.env.example`).
+Vercel webhook service only needs the Slack signature/token/channel + Redis vars.
 
 - `OPENAI_API_KEY`
 - `EXA_API_KEY`
 - `SLACK_SIGNING_SECRET`
 - `SLACK_BOT_TOKEN` (preferred) or `SLACK_USER_TOKEN`
 - `REDIS_URL`
+- `AWS_ENDPOINT_URL` (Railway bucket S3 endpoint)
+- `AWS_ACCESS_KEY_ID`
+- `AWS_SECRET_ACCESS_KEY`
+- `AWS_S3_BUCKET_NAME`
 - `SALESQL_API_KEY` (thread-reply enrichment workflow)
 - `REOON_API_KEY` (thread-reply enrichment workflow)
 - `BOUNCEBAN_API_KEY` (thread-reply enrichment workflow)
@@ -68,13 +106,24 @@ Set these in both:
 
 Optional:
 - `SLACK_CHANNEL_ID` (default `C0AF5RGPMEW`)
-- `RQ_JD_QUEUE_NAME` (default `jd-pipeline`)
+- `RQ_JD_SOURCE_QUEUE_NAME` (default `jd-pipeline`)
+- `RQ_JD_SCORE_QUEUE_NAME` (default `jd-pipeline-score`)
+- `RQ_JD_QUEUE_NAME` (legacy fallback for source queue)
 - `RQ_REPLY_QUEUE_NAME` (default `reply-enrichment`)
 - `RQ_QUEUE_NAME` (legacy fallback for JD queue name only)
-- `RQ_WORKER_QUEUE_TYPE` (default `jd`; worker can consume `jd`, `reply`, or `all`)
+- `RQ_WORKER_QUEUE_TYPE` (default `source`; worker can consume `source`, `score`, `jd` (legacy source alias), `reply`, or `all`)
 - `RQ_JOB_TIMEOUT` (default `7200`)
 - `RQ_WITH_SCHEDULER` (default `false`; keep disabled unless you use scheduled RQ jobs)
 - `RQ_STOP_ON_JOB_FAILURE` (default `true`; when a queued job fails, stop the worker before dequeuing the next job)
+- `PIPELINE_RUNS_PREFIX` (default `runs`; handoff root prefix)
+- `AWS_DEFAULT_REGION` (default `auto`)
+- `S3_ADDRESSING_STYLE` (default `virtual`; set `path` only if your Railway bucket credentials page requires path style)
+- `RAILWAY_BUCKET_KEY_PREFIX` (default empty; prepended to all object keys)
+- `RAILWAY_BUCKET_USE_SSL` (default `true`)
+- `RAILWAY_BUCKET_MAX_ATTEMPTS` (default `4`)
+- `RAILWAY_BUCKET_BASE_BACKOFF_SECONDS` (default `0.5`)
+- `RAILWAY_BUCKET_MAX_BACKOFF_SECONDS` (default `8`)
+- Legacy compatibility aliases are still supported in code: `ENDPOINT`, `ACCESS_KEY_ID`, `SECRET_ACCESS_KEY`, `BUCKET`, `REGION`, `RAILWAY_BUCKET_ENDPOINT_URL`, `RAILWAY_BUCKET_ACCESS_KEY_ID`, `RAILWAY_BUCKET_SECRET_ACCESS_KEY`, `RAILWAY_BUCKET_REGION`, `RAILWAY_BUCKET_NAME`.
 - `SLACK_EVENT_TTL_SECONDS` (default `86400`)
 - `SLACK_EVENT_DEDUP_ENABLED` (default `true`)
 - `SLACK_EVENT_DEDUP_FAIL_OPEN` (default `true`)
@@ -161,20 +210,28 @@ python worker.py
 Dedicated workers:
 
 ```bash
-python worker.py --queue-type jd
+python worker.py --queue-type source
+python worker.py --queue-type score
 python worker.py --queue-type reply
 ```
 
 Recommended production shape:
-- run `2` JD workers: `python worker.py --queue-type jd`
+- run `2` source workers: `python worker.py --queue-type source`
+- run `1` score worker: `python worker.py --queue-type score`
 - run `1` reply worker: `python worker.py --queue-type reply`
+
+Queue topology:
+- `RQ_JD_SOURCE_QUEUE_NAME` -> `worker.process_jd_source_job`
+- `RQ_JD_SCORE_QUEUE_NAME` -> `worker.process_jd_score_job`
+- `RQ_REPLY_QUEUE_NAME` -> `worker.process_thread_reply_enrichment_job`
 
 Railway expected commands:
 - Build: `pip install -r requirements.txt` (or leave default with `nixpacks.toml`)
-- Start: `python -u worker.py --queue-type jd`
+- Start: `python -u worker.py --queue-type source`
 
 Helper scripts committed in repo:
 - `./scripts/start-jd-worker.sh`
+- `./scripts/start-score-worker.sh`
 - `./scripts/start-reply-worker.sh`
 
 For one-shot processing (CI/manual):
@@ -209,16 +266,20 @@ Railway will not create the extra worker service or replica count automatically 
 You need one-time service configuration in Railway after deploy.
 
 Recommended layout:
-- Service `jit-worker-jd`
+- Service `jit-worker-source`
   - Start command: `./scripts/start-jd-worker.sh`
   - Replicas: `2`
+- Service `jit-worker-score`
+  - Start command: `./scripts/start-score-worker.sh`
+  - Replicas: `1`
 - Service `jit-worker-reply`
   - Start command: `./scripts/start-reply-worker.sh`
   - Replicas: `1`
 
 Notes:
-- `nixpacks.toml` now defaults to the JD worker script, so an existing single Railway worker service will continue as a JD worker.
+- `nixpacks.toml` defaults to the source worker script.
 - The reply worker should be a separate Railway service that points to the same repo and same env vars, but uses the reply start command above.
+- The score worker should be a separate Railway service that points to the same repo and same env vars, but uses the score start command above.
 - Replica count is configured in Railway service settings, not in this repo.
 - If Railway logs `Work-horse terminated unexpectedly; waitpid returned 9`, reduce memory pressure by lowering `SCORING_CONCURRENT_CALLS` (for example `4`) and keep `PIPELINE_INCLUDE_RAW_JSON=false`.
 
@@ -271,7 +332,7 @@ Persistence:
 
 ## Notes
 
-- Pipeline outputs are written under `/tmp` in worker runs and cleaned up after each job.
+- Local pipeline intermediates are still written under `/tmp` inside each job and cleaned up after each run.
+- Cross-job state (source -> score handoff) is persisted in the Railway bucket under `runs/{run_id}/...`.
 - Step updates are posted to Slack at each stage completion.
 - The 15 generated Exa prompts are uploaded to Slack as a `.txt` file per run.
----

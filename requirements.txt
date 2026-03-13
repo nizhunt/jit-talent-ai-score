@@ -8,5 +8,6 @@ fastapi
 uvicorn
 redis
 rq
+boto3
 google-api-python-client
 google-auth

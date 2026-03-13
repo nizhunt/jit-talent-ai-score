@@ -1929,17 +1929,20 @@ def get_google_domain_role() -> str:
     return "writer"
 
 
-def run_pipeline_from_jd_text(
+def get_sheet_ready_csv_path(scored_csv_path: str) -> str:
+    if scored_csv_path.lower().endswith(".csv"):
+        return f"{scored_csv_path[:-4]}-sheet-ready.csv"
+    return f"{scored_csv_path}-sheet-ready.csv"
+
+
+def run_source_stage_from_jd_text(
     *,
     jd_text: str,
     args: argparse.Namespace,
     client: OpenAI,
     exa_api_key: str,
-    slack_token: str,
 ) -> Dict[str, Any]:
-    pipeline_start = time.monotonic()
     jd_name = normalize_whitespace(str(getattr(args, "jd_name", "") or ""))
-    jd_label = format_jd_label(jd_name)
     jd_test_mode = bool(getattr(args, "jd_test_mode", False))
     removed_legacy_logs = cleanup_legacy_exa_query_logs()
     if removed_legacy_logs:
@@ -1948,19 +1951,9 @@ def run_pipeline_from_jd_text(
     exa_query_prompt_template = ""
     if not jd_test_mode:
         exa_query_prompt_template = read_text_file(args.exa_query_prompt_path)
-    scorer_prompt_template = read_text_file(args.scorer_prompt_path)
 
     write_text_file(args.jd_path, jd_text)
     print(f"Wrote JD text to {args.jd_path}")
-
-    # Fail before Exa/OpenAI-heavy stages if result sheet creation is blocked.
-    sheet_title = build_sheet_title(jd_name=jd_name, scored_csv_path=args.scored_csv)
-    google_sheet = create_google_sheet_placeholder(
-        spreadsheet_title=sheet_title,
-        folder_id=require_env("GOOGLE_DRIVE_FOLDER_ID"),
-        workspace_domain=require_env("GOOGLE_WORKSPACE_DOMAIN"),
-        domain_role=get_google_domain_role(),
-    )
 
     # --- Stage: widen JD, generate queries, search Exa, and flatten — in batches ---
     debug_pause(args.debug, "generate_queries")
@@ -2086,6 +2079,49 @@ def run_pipeline_from_jd_text(
 
     maybe_stop(args.stop_after, "dedup")
 
+    return {
+        "jd_name": jd_name,
+        "jd_test_mode": jd_test_mode,
+        "queries": list(all_queries),
+        "queries_count": queries_count,
+        "total_results": total_exa_results,
+        "rows_before_dedup": rows_before_dedup,
+        "rows_after_dedup": rows_after_dedup,
+        "query_generation_usage": dict(total_query_gen_usage),
+        "jd_context_by_prompt_file": dict(jd_context_by_prompt_file),
+    }
+
+
+def run_score_stage_from_handoff(
+    *,
+    args: argparse.Namespace,
+    client: OpenAI,
+    slack_token: str,
+    source_stage_result: Dict[str, Any],
+    pipeline_started_at_unix: Optional[float] = None,
+    post_final_message: bool = True,
+) -> Dict[str, Any]:
+    score_stage_start = time.monotonic()
+    jd_name = normalize_whitespace(str(source_stage_result.get("jd_name") or getattr(args, "jd_name", "") or ""))
+    jd_label = format_jd_label(jd_name)
+    scorer_prompt_template = read_text_file(args.scorer_prompt_path)
+    total_query_gen_usage = dict(source_stage_result.get("query_generation_usage") or {})
+    if not total_query_gen_usage:
+        total_query_gen_usage = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+    jd_context_by_prompt_file = dict(source_stage_result.get("jd_context_by_prompt_file") or {})
+    queries_count = int(source_stage_result.get("queries_count") or 0)
+    total_exa_results = int(source_stage_result.get("total_results") or 0)
+    rows_before_dedup = int(source_stage_result.get("rows_before_dedup") or 0)
+    rows_after_dedup = int(source_stage_result.get("rows_after_dedup") or 0)
+
+    sheet_title = build_sheet_title(jd_name=jd_name, scored_csv_path=args.scored_csv)
+    google_sheet = create_google_sheet_placeholder(
+        spreadsheet_title=sheet_title,
+        folder_id=require_env("GOOGLE_DRIVE_FOLDER_ID"),
+        workspace_domain=require_env("GOOGLE_WORKSPACE_DOMAIN"),
+        domain_role=get_google_domain_role(),
+    )
+
     debug_pause(args.debug, "score")
 
     def on_score_progress(payload: Dict[str, Any]) -> None:
@@ -2117,10 +2153,7 @@ def run_pipeline_from_jd_text(
     maybe_stop(args.stop_after, "score")
 
     debug_pause(args.debug, "post")
-    if args.scored_csv.lower().endswith(".csv"):
-        sheet_ready_csv = f"{args.scored_csv[:-4]}-sheet-ready.csv"
-    else:
-        sheet_ready_csv = f"{args.scored_csv}-sheet-ready.csv"
+    sheet_ready_csv = get_sheet_ready_csv_path(args.scored_csv)
 
     rows_scored = len(scored_df)
     qualified_finds = count_qualified_finds(scored_df, minimum_score=5.0)
@@ -2138,8 +2171,6 @@ def run_pipeline_from_jd_text(
 
     sheet_ready_df = write_sheet_ready_csv(sheet_ready_csv, scored_df)
     del scored_df
-    all_queries.clear()
-    jd_context_by_prompt_file.clear()
     gc.collect()
 
     total_input_tokens = int(total_query_gen_usage.get("input_tokens", 0)) + int(scoring_usage.get("input_tokens", 0))
@@ -2160,7 +2191,10 @@ def run_pipeline_from_jd_text(
         used_assumptions=used_assumptions,
     )
 
-    elapsed = time.monotonic() - pipeline_start
+    if pipeline_started_at_unix is not None:
+        elapsed = max(0.0, time.time() - float(pipeline_started_at_unix))
+    else:
+        elapsed = time.monotonic() - score_stage_start
     tally_block = "\n".join(score_tally_lines) if score_tally_lines else "  (no scores)"
     jd_name_line = f"JD Name: {jd_name}\n" if jd_name else ""
     if qualified_finds > 0:
@@ -2201,14 +2235,15 @@ def run_pipeline_from_jd_text(
         score_tally_lines=score_tally_lines,
         linkedin_sample_groups=linkedin_sample_groups,
     )
-    post_slack_message(
-        slack_token=slack_token,
-        channel_id=args.channel_id,
-        text=result_message_text,
-        blocks=result_message_blocks,
-        unfurl_links=False,
-        unfurl_media=False,
-    )
+    if post_final_message:
+        post_slack_message(
+            slack_token=slack_token,
+            channel_id=args.channel_id,
+            text=result_message_text,
+            blocks=result_message_blocks,
+            unfurl_links=False,
+            unfurl_media=False,
+        )
 
     maybe_stop(args.stop_after, "post")
 
@@ -2226,7 +2261,34 @@ def run_pipeline_from_jd_text(
         "queries_log_path": None,
         "cost_summary": cost_summary,
         "score_counts_by_score": score_counts_by_score,
+        "result_message_text": result_message_text,
+        "result_message_blocks": result_message_blocks,
     }
+
+
+def run_pipeline_from_jd_text(
+    *,
+    jd_text: str,
+    args: argparse.Namespace,
+    client: OpenAI,
+    exa_api_key: str,
+    slack_token: str,
+) -> Dict[str, Any]:
+    pipeline_started_at_unix = time.time()
+    source_stage_result = run_source_stage_from_jd_text(
+        jd_text=jd_text,
+        args=args,
+        client=client,
+        exa_api_key=exa_api_key,
+    )
+    return run_score_stage_from_handoff(
+        args=args,
+        client=client,
+        slack_token=slack_token,
+        source_stage_result=source_stage_result,
+        pipeline_started_at_unix=pipeline_started_at_unix,
+        post_final_message=True,
+    )
 
 
 def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:

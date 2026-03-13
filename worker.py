@@ -1,8 +1,10 @@
 import argparse
+import hashlib
 import os
 import re
 import signal
 import shutil
+import time
 import uuid
 from typing import Any, Dict, List, Optional
 
@@ -10,9 +12,24 @@ from dotenv import load_dotenv
 from openai import OpenAI
 from rq import Worker
 
+from bucket_storage import S3BucketClient, build_s3_bucket_client_from_env
 from dashboard_logger import log_enrichment_dashboard_row, log_jd_processing_dashboard_row
-from process_candidates import parse_args, post_slack_message, run_pipeline_from_jd_text
-from queueing import clear_event_seen, get_jd_queue_name, get_redis_connection, get_reply_queue_name
+from pipeline_handoff import build_run_artifact_keys, required_handoff_keys
+from process_candidates import (
+    parse_args,
+    post_slack_message,
+    run_score_stage_from_handoff,
+    run_source_stage_from_jd_text,
+)
+from queueing import (
+    clear_event_seen,
+    enqueue_jd_score_job,
+    get_jd_queue_name,
+    get_jd_score_queue_name,
+    get_jd_source_queue_name,
+    get_redis_connection,
+    get_reply_queue_name,
+)
 from thread_reply_enrichment import post_thread_reply_update, run_thread_reply_enrichment_pipeline
 
 
@@ -41,6 +58,28 @@ def _jd_prefix(jd_name: Optional[str]) -> str:
     if not name:
         return ""
     return f"[{name}] "
+
+
+def _stable_run_id_from_event(event_id: str) -> str:
+    digest = hashlib.sha1(event_id.encode("utf-8")).hexdigest()[:12]
+    return digest
+
+
+def _resolve_run_id(run_id: Optional[str], event_id: Optional[str]) -> str:
+    normalized = re.sub(r"[^a-zA-Z0-9_-]+", "", str(run_id or "")).strip("-_")
+    if normalized:
+        return normalized[:48]
+    if event_id:
+        return _stable_run_id_from_event(event_id)
+    return uuid.uuid4().hex[:12]
+
+
+def _score_job_id(run_id: str) -> str:
+    return f"jd-score:{run_id}"
+
+
+def _build_bucket_client() -> S3BucketClient:
+    return build_s3_bucket_client_from_env()
 
 
 def _slack_escape(text: str) -> str:
@@ -128,6 +167,7 @@ def build_pipeline_args(
     channel_id: str,
     jd_name: Optional[str] = None,
     jd_test_mode: bool = False,
+    run_id: Optional[str] = None,
 ) -> argparse.Namespace:
     args = parse_args([])
     args.channel_id = channel_id
@@ -143,11 +183,12 @@ def build_pipeline_args(
     args.scorer_prompt_path = os.path.join(project_root, "prompts", "scorer_prompt.md")
     args.jd_widening_prompts_dir = os.path.join(project_root, "prompts", "jd-widening-prompts")
 
-    run_id = uuid.uuid4().hex[:12]
+    resolved_run_id = _resolve_run_id(run_id, event_id=None)
     jd_slug = _slugify_identifier(args.jd_name, default="jd")
-    run_dir = os.path.join("/tmp", f"jit-talent-worker-{jd_slug}-{run_id}")
+    run_dir = os.path.join("/tmp", f"jit-talent-worker-{jd_slug}-{resolved_run_id}")
     os.makedirs(run_dir, exist_ok=True)
     args.run_dir = run_dir
+    args.run_id = resolved_run_id
 
     args.jd_path = os.path.join(run_dir, "jd.md")
     if args.jd_name:
@@ -171,6 +212,148 @@ def cleanup_run_dir(run_dir: Optional[str]) -> None:
         return
     except Exception as exc:
         print(f"[warn] failed to clean up run dir '{run_dir}': {exc}")
+
+
+def _load_existing_meta_if_present(bucket: S3BucketClient, artifact_keys: Dict[str, str]) -> Dict[str, Any]:
+    meta_key = artifact_keys["meta"]
+    try:
+        if not bucket.exists(meta_key):
+            return {}
+        payload = bucket.download_json(meta_key)
+        if isinstance(payload, dict):
+            return payload
+    except Exception as exc:
+        print(f"[warn] failed to read existing meta from bucket key={meta_key}: {exc}")
+    return {}
+
+
+def _upload_source_handoff_artifacts(
+    *,
+    bucket: S3BucketClient,
+    artifact_keys: Dict[str, str],
+    args: argparse.Namespace,
+    jd_text: str,
+    source_result: Dict[str, Any],
+    channel_id: str,
+    jd_name: Optional[str],
+    jd_test_mode: bool,
+    event_id: Optional[str],
+    message_ts: Optional[str],
+    pipeline_started_at_unix: float,
+) -> Dict[str, Any]:
+    existing_meta = _load_existing_meta_if_present(bucket=bucket, artifact_keys=artifact_keys)
+    persisted_started_at = float(existing_meta.get("pipeline_started_at_unix") or pipeline_started_at_unix)
+
+    queries = source_result.get("queries") or []
+    if not isinstance(queries, list):
+        queries = []
+    query_generation_usage = source_result.get("query_generation_usage") or {}
+    if not isinstance(query_generation_usage, dict):
+        query_generation_usage = {}
+
+    meta: Dict[str, Any] = {
+        "run_id": getattr(args, "run_id", ""),
+        "channel_id": channel_id,
+        "jd_name": (jd_name or "").strip(),
+        "jd_test_mode": bool(jd_test_mode),
+        "event_id": event_id or "",
+        "message_ts": message_ts or "",
+        "pipeline_started_at_unix": persisted_started_at,
+        "source_stage_completed_at_unix": time.time(),
+        "queries_count": int(source_result.get("queries_count") or len(queries)),
+        "total_results": int(source_result.get("total_results") or 0),
+        "rows_before_dedup": int(source_result.get("rows_before_dedup") or 0),
+        "rows_after_dedup": int(source_result.get("rows_after_dedup") or 0),
+        "query_generation_usage": query_generation_usage,
+        "artifact_keys": artifact_keys,
+        "source_attempt_count": int(existing_meta.get("source_attempt_count") or 0) + 1,
+    }
+
+    print(
+        f"[pipeline] run_id={meta['run_id']} uploading_handoff "
+        f"keys={','.join(required_handoff_keys(artifact_keys))}"
+    )
+    bucket.upload_text(artifact_keys["jd_text"], jd_text)
+    bucket.upload_file(artifact_keys["dedup_csv"], args.dedup_csv, content_type="text/csv")
+    bucket.upload_json(artifact_keys["jd_context_by_prompt"], source_result.get("jd_context_by_prompt_file") or {})
+    bucket.upload_json(artifact_keys["queries"], queries)
+    bucket.upload_json(artifact_keys["meta"], meta)
+    return meta
+
+
+def _assert_required_handoff_artifacts(bucket: S3BucketClient, artifact_keys: Dict[str, str]) -> None:
+    missing: List[str] = []
+    for key in required_handoff_keys(artifact_keys):
+        if not bucket.exists(key):
+            missing.append(key)
+    if missing:
+        missing_list = ", ".join(missing)
+        raise RuntimeError(f"Missing required handoff artifacts for run: {missing_list}")
+
+
+def _download_score_handoff_artifacts(
+    *,
+    bucket: S3BucketClient,
+    artifact_keys: Dict[str, str],
+    args: argparse.Namespace,
+) -> Dict[str, Any]:
+    _assert_required_handoff_artifacts(bucket=bucket, artifact_keys=artifact_keys)
+    bucket.download_file(artifact_keys["jd_text"], args.jd_path)
+    bucket.download_file(artifact_keys["dedup_csv"], args.dedup_csv)
+    jd_context = bucket.download_json(artifact_keys["jd_context_by_prompt"])
+    queries = bucket.download_json(artifact_keys["queries"])
+    meta = bucket.download_json(artifact_keys["meta"])
+    if not isinstance(jd_context, dict):
+        raise RuntimeError("Invalid jd_context_by_prompt artifact: expected JSON object.")
+    if not isinstance(queries, list):
+        raise RuntimeError("Invalid queries artifact: expected JSON array.")
+    if not isinstance(meta, dict):
+        raise RuntimeError("Invalid meta artifact: expected JSON object.")
+    return {
+        "jd_context_by_prompt_file": jd_context,
+        "queries": queries,
+        "meta": meta,
+    }
+
+
+def _post_final_summary_once(
+    *,
+    bucket: S3BucketClient,
+    artifact_keys: Dict[str, str],
+    slack_token: str,
+    channel_id: str,
+    run_id: str,
+    result_message_text: str,
+    result_message_blocks: List[Dict[str, Any]],
+) -> str:
+    marker_key = artifact_keys["final_summary_posted"]
+    if bucket.exists(marker_key):
+        print(f"[pipeline] run_id={run_id} final_summary_already_posted key={marker_key}; skipping")
+        return "already_posted"
+
+    post_response = post_slack_message(
+        slack_token=slack_token,
+        channel_id=channel_id,
+        text=result_message_text,
+        blocks=result_message_blocks,
+        unfurl_links=False,
+        unfurl_media=False,
+    )
+    try:
+        bucket.upload_json(
+            marker_key,
+            {
+                "run_id": run_id,
+                "posted_at_unix": time.time(),
+                "channel_id": channel_id,
+                "slack_ts": str(post_response.get("ts") or ""),
+            },
+        )
+        print(f"[pipeline] run_id={run_id} final_summary_posted key={marker_key}")
+        return "posted"
+    except Exception as exc:
+        print(f"[warn] run_id={run_id} failed to persist final summary marker key={marker_key}: {exc}")
+        return "posted_marker_failed"
 
 
 def _notify_failure(
@@ -225,7 +408,7 @@ def _notify_thread_failure(
             print(f"[warn] failed to clear event dedup marker: {exc}")
 
 
-def process_jd_pipeline_job(
+def process_jd_source_job(
     *,
     jd_text: str,
     message_ts: Optional[str],
@@ -233,14 +416,19 @@ def process_jd_pipeline_job(
     jd_name: Optional[str] = None,
     jd_test_mode: bool = False,
     event_id: Optional[str] = None,
+    run_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     load_dotenv()
     _ = message_ts  # reserved for compatibility with existing enqueued payloads
     run_dir: Optional[str] = None
+    resolved_run_id = _resolve_run_id(run_id, event_id)
 
     openai_api_key = require_env("OPENAI_API_KEY")
     exa_api_key = require_env("EXA_API_KEY")
     slack_token = os.getenv("SLACK_BOT_TOKEN") or require_env("SLACK_USER_TOKEN")
+    bucket = _build_bucket_client()
+
+    print(f"[pipeline] run_id={resolved_run_id} source_started")
 
     post_slack_message(
         slack_token=slack_token,
@@ -253,37 +441,204 @@ def process_jd_pipeline_job(
 
     try:
         client = OpenAI(api_key=openai_api_key)
-        args = build_pipeline_args(channel_id=channel_id, jd_name=jd_name, jd_test_mode=jd_test_mode)
+        args = build_pipeline_args(
+            channel_id=channel_id,
+            jd_name=jd_name,
+            jd_test_mode=jd_test_mode,
+            run_id=resolved_run_id,
+        )
         run_dir = getattr(args, "run_dir", None)
-        result = run_pipeline_from_jd_text(
+        source_result = run_source_stage_from_jd_text(
             jd_text=jd_text,
             args=args,
             client=client,
             exa_api_key=exa_api_key,
-            slack_token=slack_token,
         )
-        try:
-            log_jd_processing_dashboard_row(
-                jd_name=jd_name or "",
-                candidate_sheet_url=str(result.get("google_sheet_url") or ""),
-                total_profiles_found=int(result.get("rows_before_dedup") or 0),
-                profiles_after_dedup=int(result.get("rows_after_dedup") or 0),
-                score_counts_by_score=result.get("score_counts_by_score") or {},
-            )
-        except Exception as exc:
-            print(f"[warn] dashboard JD logging failed: {exc}")
+
+        artifact_keys = build_run_artifact_keys(resolved_run_id)
+        meta = _upload_source_handoff_artifacts(
+            bucket=bucket,
+            artifact_keys=artifact_keys,
+            args=args,
+            jd_text=jd_text,
+            source_result=source_result,
+            channel_id=channel_id,
+            jd_name=jd_name,
+            jd_test_mode=jd_test_mode,
+            event_id=event_id,
+            message_ts=message_ts,
+            pipeline_started_at_unix=time.time(),
+        )
+
+        score_payload = {
+            "run_id": resolved_run_id,
+            "channel_id": channel_id,
+            "jd_name": (jd_name or "").strip(),
+            "jd_test_mode": bool(jd_test_mode),
+            "event_id": event_id,
+            "artifact_root_key": artifact_keys["root"],
+        }
+        print(f"[queue] run_id={resolved_run_id} score_queued payload_keys={','.join(sorted(score_payload.keys()))}")
+        score_job = enqueue_jd_score_job(score_payload, job_id=_score_job_id(resolved_run_id))
+
         return {
             "ok": True,
             "event_id": event_id,
             "jd_name": jd_name,
             "jd_test_mode": bool(jd_test_mode),
-            "result": result,
+            "run_id": resolved_run_id,
+            "artifact_keys": artifact_keys,
+            "meta": meta,
+            "score_job_id": score_job.id,
+            "status": "source_completed_score_queued",
         }
     except Exception as exc:
-        _notify_failure(channel_id=channel_id, error_msg=str(exc), event_id=event_id, jd_name=jd_name)
+        _notify_failure(
+            channel_id=channel_id,
+            error_msg=str(exc),
+            event_id=event_id,
+            jd_name=jd_name,
+        )
         raise  # Re-raise so RQ marks the job as failed
     finally:
         cleanup_run_dir(run_dir)
+
+
+def process_jd_score_job(
+    *,
+    run_id: str,
+    channel_id: str,
+    jd_name: Optional[str] = None,
+    jd_test_mode: bool = False,
+    event_id: Optional[str] = None,
+    artifact_root_key: Optional[str] = None,
+) -> Dict[str, Any]:
+    load_dotenv()
+    run_dir: Optional[str] = None
+    resolved_run_id = _resolve_run_id(run_id, event_id)
+
+    openai_api_key = require_env("OPENAI_API_KEY")
+    slack_token = os.getenv("SLACK_BOT_TOKEN") or require_env("SLACK_USER_TOKEN")
+    bucket = _build_bucket_client()
+    artifact_keys = build_run_artifact_keys(resolved_run_id)
+    if artifact_root_key and artifact_root_key != artifact_keys["root"]:
+        print(
+            f"[warn] run_id={resolved_run_id} artifact_root_key mismatch "
+            f"payload={artifact_root_key} derived={artifact_keys['root']}; using derived key"
+        )
+
+    print(f"[pipeline] run_id={resolved_run_id} score_started")
+    resolved_jd_name = (jd_name or "").strip()
+
+    try:
+        client = OpenAI(api_key=openai_api_key)
+        args = build_pipeline_args(
+            channel_id=channel_id,
+            jd_name=resolved_jd_name,
+            jd_test_mode=jd_test_mode,
+            run_id=resolved_run_id,
+        )
+        run_dir = getattr(args, "run_dir", None)
+
+        handoff = _download_score_handoff_artifacts(
+            bucket=bucket,
+            artifact_keys=artifact_keys,
+            args=args,
+        )
+        meta = handoff["meta"]
+        if not resolved_jd_name:
+            resolved_jd_name = str(meta.get("jd_name") or "").strip()
+            args.jd_name = resolved_jd_name
+
+        source_stage_result = {
+            "jd_name": resolved_jd_name,
+            "jd_test_mode": bool(meta.get("jd_test_mode", jd_test_mode)),
+            "queries": handoff.get("queries") or [],
+            "queries_count": int(meta.get("queries_count") or len(handoff.get("queries") or [])),
+            "total_results": int(meta.get("total_results") or 0),
+            "rows_before_dedup": int(meta.get("rows_before_dedup") or 0),
+            "rows_after_dedup": int(meta.get("rows_after_dedup") or 0),
+            "query_generation_usage": meta.get("query_generation_usage") or {},
+            "jd_context_by_prompt_file": handoff.get("jd_context_by_prompt_file") or {},
+        }
+
+        result = run_score_stage_from_handoff(
+            args=args,
+            client=client,
+            slack_token=slack_token,
+            source_stage_result=source_stage_result,
+            pipeline_started_at_unix=float(meta.get("pipeline_started_at_unix") or 0) or None,
+            post_final_message=False,
+        )
+
+        final_post_status = _post_final_summary_once(
+            bucket=bucket,
+            artifact_keys=artifact_keys,
+            slack_token=slack_token,
+            channel_id=channel_id,
+            run_id=resolved_run_id,
+            result_message_text=str(result.get("result_message_text") or ""),
+            result_message_blocks=result.get("result_message_blocks") or [],
+        )
+
+        try:
+            log_jd_processing_dashboard_row(
+                jd_name=resolved_jd_name,
+                candidate_sheet_url=str(result.get("google_sheet_url") or ""),
+                total_profiles_found=int(result.get("rows_before_dedup") or 0),
+                profiles_after_dedup=int(result.get("rows_after_dedup") or 0),
+                score_counts_by_score=result.get("score_counts_by_score") or {},
+            )
+        except Exception as dashboard_exc:
+            print(f"[warn] dashboard JD logging failed: {dashboard_exc}")
+
+        updated_meta = dict(meta)
+        updated_meta["score_stage_completed_at_unix"] = time.time()
+        updated_meta["final_summary_post_status"] = final_post_status
+        updated_meta["google_sheet_url"] = str(result.get("google_sheet_url") or "")
+        bucket.upload_json(artifact_keys["meta"], updated_meta)
+
+        return {
+            "ok": True,
+            "event_id": event_id,
+            "jd_name": resolved_jd_name,
+            "jd_test_mode": bool(jd_test_mode),
+            "run_id": resolved_run_id,
+            "result": result,
+            "final_summary_post_status": final_post_status,
+        }
+    except Exception as exc:
+        _notify_failure(
+            channel_id=channel_id,
+            error_msg=str(exc),
+            event_id=event_id,
+            jd_name=resolved_jd_name or jd_name,
+        )
+        raise
+    finally:
+        cleanup_run_dir(run_dir)
+
+
+def process_jd_pipeline_job(
+    *,
+    jd_text: str,
+    message_ts: Optional[str],
+    channel_id: str,
+    jd_name: Optional[str] = None,
+    jd_test_mode: bool = False,
+    event_id: Optional[str] = None,
+    run_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    # Backward-compatible entrypoint. Legacy callers enqueue this and now land in source stage.
+    return process_jd_source_job(
+        jd_text=jd_text,
+        message_ts=message_ts,
+        channel_id=channel_id,
+        jd_name=jd_name,
+        jd_test_mode=jd_test_mode,
+        event_id=event_id,
+        run_id=run_id,
+    )
 
 
 def process_thread_reply_enrichment_job(
@@ -428,7 +783,7 @@ def process_thread_reply_enrichment_job(
 
 
 def parse_worker_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="RQ worker for JD and reply-enrichment queues")
+    parser = argparse.ArgumentParser(description="RQ worker for JD source/score and reply-enrichment queues")
     parser.add_argument("--burst", action="store_true", help="Exit after current queue is drained")
     parser.add_argument(
         "--with-scheduler",
@@ -437,19 +792,24 @@ def parse_worker_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--queue-type",
-        choices=["jd", "reply", "all"],
-        default=os.getenv("RQ_WORKER_QUEUE_TYPE", "jd"),
-        help="Queue set to consume: jd, reply, or all (default: jd).",
+        choices=["source", "score", "jd", "reply", "all"],
+        default=os.getenv("RQ_WORKER_QUEUE_TYPE", "source"),
+        help="Queue set to consume: source, score, jd(legacy source alias), reply, or all (default: source).",
     )
     return parser.parse_args()
 
 
 def get_worker_queue_names(queue_type: str) -> List[str]:
+    if queue_type == "source":
+        return [get_jd_source_queue_name()]
+    if queue_type == "score":
+        return [get_jd_score_queue_name()]
     if queue_type == "jd":
+        # Legacy alias kept for existing Railway services/scripts.
         return [get_jd_queue_name()]
     if queue_type == "reply":
         return [get_reply_queue_name()]
-    return [get_jd_queue_name(), get_reply_queue_name()]
+    return [get_jd_source_queue_name(), get_jd_score_queue_name(), get_reply_queue_name()]
 
 
 def attach_fail_fast_exception_handler(worker: Worker) -> None:
