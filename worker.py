@@ -76,7 +76,8 @@ def _resolve_run_id(run_id: Optional[str], event_id: Optional[str]) -> str:
 
 
 def _score_job_id(run_id: str) -> str:
-    return f"jd-score:{run_id}"
+    # RQ job ids cannot contain ":" in this runtime.
+    return f"jd-score-{run_id}"
 
 
 def _build_bucket_client() -> S3BucketClient:
