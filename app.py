@@ -209,34 +209,34 @@ async def slack_events(request: Request):
     enqueue_fn: Any
     job_payload: Dict[str, Any]
 
-    jd_payload = parse_jd_message(text)
-    if jd_payload is not None:
-        jd_text = jd_payload["jd_text"]
-        jd_name = jd_payload.get("jd_name", "")
-        jd_test_mode = str(jd_payload.get("jd_test_mode", "false")).strip().lower() == "true"
-        if not jd_text:
-            return JSONResponse({"ok": True, "ignored": "empty_jd"})
-        workflow_name = "jd_pipeline"
-        enqueue_fn = enqueue_jd_pipeline_job
+    admin_command = parse_admin_command(text)
+    if admin_command is not None:
+        workflow_name = "jd_admin"
+        enqueue_fn = enqueue_jd_admin_job
         job_payload = {
-            "jd_text": jd_text,
-            "jd_name": jd_name,
-            "jd_test_mode": jd_test_mode,
-            "message_ts": message_ts,
             "channel_id": channel_id,
+            "message_ts": message_ts,
+            "user_id": event.get("user", ""),
             "event_id": event_id,
+            "command": admin_command,
         }
     else:
-        admin_command = parse_admin_command(text)
-        if admin_command is not None:
-            workflow_name = "jd_admin"
-            enqueue_fn = enqueue_jd_admin_job
+        jd_payload = parse_jd_message(text)
+        if jd_payload is not None:
+            jd_text = jd_payload["jd_text"]
+            jd_name = jd_payload.get("jd_name", "")
+            jd_test_mode = str(jd_payload.get("jd_test_mode", "false")).strip().lower() == "true"
+            if not jd_text:
+                return JSONResponse({"ok": True, "ignored": "empty_jd"})
+            workflow_name = "jd_pipeline"
+            enqueue_fn = enqueue_jd_pipeline_job
             job_payload = {
-                "channel_id": channel_id,
+                "jd_text": jd_text,
+                "jd_name": jd_name,
+                "jd_test_mode": jd_test_mode,
                 "message_ts": message_ts,
-                "user_id": event.get("user", ""),
+                "channel_id": channel_id,
                 "event_id": event_id,
-                "command": admin_command,
             }
         elif is_thread_reply:
             threshold = parse_threshold_from_text(text)
