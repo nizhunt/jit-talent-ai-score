@@ -24,6 +24,8 @@ COL_PRE_EXIST_IN_INSTANTLY = "pre-exist in instantly"
 COL_NET_LEADS_ENROLLED_INSTANTLY = "Net Leads Enrolled to Instantly"
 COL_INSTANTLY_CAMPAIGN_NAME = "Instantly Campaign Name"
 COL_INSTANTLY_CAMPAIGN_URL = "Instantly Campaign URL"
+COL_HEYREACH_SCORE = "HeyReach Score"
+COL_HEYREACH_LIST_URL = "HeyReach List URL"
 COL_NOTES = "Notes"
 
 SCORE_COLUMNS = {score: f"Score {score} Count" for score in range(10, -1, -1)}
@@ -45,6 +47,8 @@ DASHBOARD_COLUMNS = [
     COL_NET_LEADS_ENROLLED_INSTANTLY,
     COL_INSTANTLY_CAMPAIGN_NAME,
     COL_INSTANTLY_CAMPAIGN_URL,
+    COL_HEYREACH_SCORE,
+    COL_HEYREACH_LIST_URL,
     COL_NOTES,
 ]
 
@@ -95,6 +99,13 @@ def _build_instantly_campaign_url(campaign_id: str) -> str:
     if not clean:
         return ""
     return f"https://app.instantly.ai/app/campaign/{clean}/analytics"
+
+
+def _build_heyreach_list_url(list_id: Any) -> str:
+    clean = str(list_id or "").strip()
+    if not clean or clean == "0":
+        return ""
+    return f"https://app.heyreach.io/app/lists/{clean}"
 
 
 def _upsert_dashboard_row(row: Dict[str, Any]) -> bool:
@@ -172,6 +183,33 @@ def log_enrichment_dashboard_row(
     row[COL_INSTANTLY_CAMPAIGN_NAME] = (instantly_campaign_name or "").strip()
     row[COL_INSTANTLY_CAMPAIGN_URL] = (instantly_campaign_url or "").strip() or _build_instantly_campaign_url(
         instantly_campaign_id
+    )
+    row[COL_NOTES] = (notes or "").strip()
+
+    return _upsert_dashboard_row(row)
+
+
+def log_heyreach_dashboard_row(
+    *,
+    jd_name: str,
+    candidate_sheet_url: str,
+    heyreach_score: float,
+    heyreach_list_id: Any = None,
+    heyreach_list_url: str = "",
+    notes: str = "",
+) -> bool:
+    clean_sheet_url = (candidate_sheet_url or "").strip()
+    if not clean_sheet_url:
+        return False
+
+    row = _blank_dashboard_row()
+    row[COL_LAST_UPDATED_UTC] = _now_utc_label()
+    row[COL_JD_CAMPAIGN_NAME] = (jd_name or "").strip()
+    row[COL_SCORED_SHEET_URL] = clean_sheet_url
+    row[COL_HEYREACH_SCORE] = heyreach_score
+    row[COL_HEYREACH_LIST_URL] = (
+        (heyreach_list_url or "").strip()
+        or _build_heyreach_list_url(heyreach_list_id)
     )
     row[COL_NOTES] = (notes or "").strip()
 

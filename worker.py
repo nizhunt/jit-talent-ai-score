@@ -13,7 +13,7 @@ from openai import OpenAI
 from rq import Worker
 
 from bucket_storage import S3BucketClient, build_s3_bucket_client_from_env
-from dashboard_logger import log_enrichment_dashboard_row, log_jd_processing_dashboard_row
+from dashboard_logger import log_enrichment_dashboard_row, log_heyreach_dashboard_row, log_jd_processing_dashboard_row
 from pipeline_handoff import ARTIFACT_META_JSON, build_run_artifact_keys, get_runs_prefix, required_handoff_keys
 from process_candidates import (
     parse_args,
@@ -1325,6 +1325,21 @@ def _process_heyreach_enrichment(
         )
         return {"ok": True, "event_id": event_id, "result": result}
 
+    dashboard_warning = ""
+    try:
+        log_heyreach_dashboard_row(
+            jd_name=str(result.get("jd_name") or ""),
+            candidate_sheet_url=str(result.get("source_url") or ""),
+            heyreach_score=threshold,
+            heyreach_list_id=result.get("heyreach_list_id"),
+            notes=str(result.get("note") or ""),
+        )
+        if not (os.getenv("DASHBOARD_GOOGLE_SHEET_URL") or "").strip():
+            dashboard_warning = "Dashboard logging skipped: DASHBOARD_GOOGLE_SHEET_URL is not set."
+    except Exception as exc:
+        print(f"[warn] dashboard heyreach logging failed: {exc}")
+        dashboard_warning = f"Dashboard logging failed: {exc}"
+
     lead_errors = result.get("lead_errors") or []
     list_id = result.get("heyreach_list_id")
     list_name = result.get("heyreach_list_name") or ""
@@ -1358,6 +1373,8 @@ def _process_heyreach_enrichment(
             f"Candidates meeting threshold: {result.get('rows_meeting_threshold')}"
         )
 
+    if dashboard_warning:
+        summary_text = f"{summary_text}\nDashboard: {dashboard_warning}"
     summary_blocks = _build_heyreach_summary_blocks(
         result=result,
         threshold=threshold,
