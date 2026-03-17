@@ -18,10 +18,16 @@ from queueing import (
     enqueue_jd_admin_job,
     enqueue_jd_pipeline_job,
     enqueue_thread_reply_enrichment_job,
+    get_queue,
+    get_reply_queue_name,
     mark_event_seen,
     require_env,
 )
-from thread_reply_enrichment import parse_threshold_from_text
+from thread_reply_enrichment import (
+    parse_threshold_and_target_from_text,
+    parse_threshold_from_text,
+    post_thread_reply_update,
+)
 
 
 load_dotenv()
@@ -164,7 +170,14 @@ async def health() -> JSONResponse:
 
 @app.post("/slack/events")
 async def slack_events(request: Request):
-    expected_channel_id = os.getenv("SLACK_CHANNEL_ID", CHANNEL_ID_DEFAULT)
+    primary_channel_id = os.getenv("SLACK_CHANNEL_ID", CHANNEL_ID_DEFAULT)
+    extra_channel_ids_raw = os.getenv("SLACK_EXTRA_CHANNEL_IDS", "")
+    allowed_channel_ids = {primary_channel_id}
+    for cid in extra_channel_ids_raw.split(","):
+        cid = cid.strip()
+        if cid:
+            allowed_channel_ids.add(cid)
+
     body = await request.body()
 
     try:
@@ -197,7 +210,7 @@ async def slack_events(request: Request):
         return JSONResponse({"ok": True, "ignored": "non_user_message"})
 
     channel_id = event.get("channel", "")
-    if channel_id != expected_channel_id:
+    if channel_id not in allowed_channel_ids:
         return JSONResponse({"ok": True, "ignored": "wrong_channel"})
 
     text = event.get("text", "") or ""
@@ -239,16 +252,19 @@ async def slack_events(request: Request):
                 "event_id": event_id,
             }
         elif is_thread_reply:
-            threshold = parse_threshold_from_text(text)
-            if threshold is None:
+            parsed = parse_threshold_and_target_from_text(text)
+            if parsed is None:
                 return JSONResponse({"ok": True, "ignored": "thread_reply_missing_threshold"})
-            workflow_name = "thread_reply_enrichment"
+            threshold = parsed["threshold"]
+            target = parsed["target"]
+            workflow_name = f"thread_reply_{target}"
             enqueue_fn = enqueue_thread_reply_enrichment_job
             job_payload = {
                 "channel_id": channel_id,
                 "thread_ts": thread_ts,
                 "reply_ts": message_ts,
                 "threshold": threshold,
+                "target": target,
                 "event_id": event_id,
             }
         else:
@@ -277,5 +293,21 @@ async def slack_events(request: Request):
         if event_marked_seen:
             clear_event_seen(event_id)
         raise HTTPException(status_code=503, detail=f"queue_enqueue_failed: {exc}") from exc
+
+    # If an enrichment job is queued behind other jobs, notify the user of its position.
+    if workflow_name.startswith("thread_reply_") and thread_ts:
+        try:
+            position = get_queue(get_reply_queue_name()).count
+            if position > 1:
+                slack_token = os.getenv("SLACK_BOT_TOKEN") or os.getenv("SLACK_USER_TOKEN") or ""
+                if slack_token:
+                    post_thread_reply_update(
+                        slack_token=slack_token,
+                        channel_id=channel_id,
+                        thread_ts=thread_ts,
+                        text=f"Your request `{text.strip()}` is queued at position {position}. You'll be notified when processing starts.",
+                    )
+        except Exception:
+            pass  # best-effort; don't fail the webhook response
 
     return JSONResponse({"ok": True, "status": "queued", "workflow": workflow_name, "job_id": job.id})

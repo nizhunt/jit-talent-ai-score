@@ -31,7 +31,11 @@ from queueing import (
     get_redis_connection,
     get_reply_queue_name,
 )
-from thread_reply_enrichment import post_thread_reply_update, run_thread_reply_enrichment_pipeline
+from thread_reply_enrichment import (
+    post_thread_reply_update,
+    run_thread_reply_enrichment_pipeline,
+    run_thread_reply_heyreach_pipeline,
+)
 
 
 def require_env(name: str) -> str:
@@ -1066,18 +1070,42 @@ def process_thread_reply_enrichment_job(
     thread_ts: str,
     reply_ts: Optional[str],
     threshold: float,
+    target: str = "instantly",
     event_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     load_dotenv()
     _ = reply_ts  # reserved for compatibility with existing enqueued payloads
 
+    if target == "heyreach":
+        return _process_heyreach_enrichment(
+            channel_id=channel_id,
+            thread_ts=thread_ts,
+            threshold=threshold,
+            event_id=event_id,
+        )
+
+    return _process_instantly_enrichment(
+        channel_id=channel_id,
+        thread_ts=thread_ts,
+        threshold=threshold,
+        event_id=event_id,
+    )
+
+
+def _process_instantly_enrichment(
+    *,
+    channel_id: str,
+    thread_ts: str,
+    threshold: float,
+    event_id: Optional[str] = None,
+) -> Dict[str, Any]:
     slack_token = os.getenv("SLACK_BOT_TOKEN") or require_env("SLACK_USER_TOKEN")
     verbose_updates = _is_truthy(os.getenv("THREAD_ENRICHMENT_VERBOSE_UPDATES"), default=False)
     post_thread_reply_update(
         slack_token=slack_token,
         channel_id=channel_id,
         thread_ts=thread_ts,
-        text=f"Received threshold `{threshold:g}`. Starting enrichment workflow...",
+        text=f"Received threshold `{threshold:g}` for *Instantly*. Starting enrichment workflow...",
     )
 
     try:
@@ -1142,7 +1170,7 @@ def process_thread_reply_enrichment_job(
     if campaign_id:
         campaign_analytics_url = f"https://app.instantly.ai/app/campaign/{campaign_id}/analytics"
         summary_text = (
-            f"Thread enrichment complete.\n"
+            f"Thread enrichment complete (Instantly).\n"
             f"Source: {source_name}\n"
             f"{source_url_line}"
             f"JD Name: {result.get('jd_name') or 'N/A'}\n"
@@ -1162,7 +1190,7 @@ def process_thread_reply_enrichment_job(
             summary_text = f"{summary_text}\nSkip sample: {lead_skipped[0]}"
     else:
         summary_text = (
-            f"Thread enrichment completed with no campaign created.\n"
+            f"Thread enrichment completed with no campaign created (Instantly).\n"
             f"Source: {source_name}\n"
             f"{source_url_line}"
             f"JD Name: {result.get('jd_name') or 'N/A'}\n"
@@ -1188,6 +1216,155 @@ def process_thread_reply_enrichment_job(
         lead_skipped=lead_skipped,
         lead_errors=lead_errors,
         dashboard_warning=dashboard_warning,
+    )
+    post_thread_reply_update(
+        slack_token=slack_token,
+        channel_id=channel_id,
+        thread_ts=thread_ts,
+        text=summary_text,
+        blocks=summary_blocks,
+        unfurl_links=False,
+        unfurl_media=False,
+    )
+    return {"ok": True, "event_id": event_id, "result": result}
+
+
+def _build_heyreach_summary_blocks(
+    *,
+    result: Dict[str, Any],
+    threshold: float,
+    source_name: str,
+    source_url: str,
+    list_name: str,
+    lead_errors: List[str],
+) -> List[Dict[str, Any]]:
+    has_list = bool(result.get("heyreach_list_id"))
+    title = "HeyReach enrichment complete." if has_list else "HeyReach enrichment completed with no list created."
+    blocks: List[Dict[str, Any]] = [
+        {"type": "section", "text": {"type": "mrkdwn", "text": f"*{_slack_escape(title)}*"}},
+        {
+            "type": "section",
+            "fields": [
+                {"type": "mrkdwn", "text": f"*Source*\n{_slack_escape(source_name or 'N/A')}"},
+                {"type": "mrkdwn", "text": f"*JD Name*\n{_slack_escape(str(result.get('jd_name') or 'N/A'))}"},
+                {"type": "mrkdwn", "text": f"*Threshold*\n{threshold:g}"},
+                {
+                    "type": "mrkdwn",
+                    "text": f"*Rows with score+LinkedIn parsed*\n{int(result.get('rows_with_score_and_linkedin') or 0)}",
+                },
+                {
+                    "type": "mrkdwn",
+                    "text": f"*Candidates meeting threshold*\n{int(result.get('rows_meeting_threshold') or 0)}",
+                },
+            ],
+        },
+    ]
+
+    if source_url:
+        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": f"*Source URL*\n<{source_url}|Open source sheet>"}})
+
+    if has_list:
+        blocks.append(
+            {
+                "type": "section",
+                "fields": [
+                    {"type": "mrkdwn", "text": f"*HeyReach list*\n{_slack_escape(list_name or 'N/A')}"},
+                    {"type": "mrkdwn", "text": f"*Leads added*\n{int(result.get('leads_added') or 0)}"},
+                    {"type": "mrkdwn", "text": f"*Leads updated*\n{int(result.get('leads_updated') or 0)}"},
+                    {"type": "mrkdwn", "text": f"*Leads failed*\n{int(result.get('leads_failed') or 0)}"},
+                    {"type": "mrkdwn", "text": f"*Lead add errors*\n{len(lead_errors)}"},
+                ],
+            }
+        )
+
+    return blocks
+
+
+def _process_heyreach_enrichment(
+    *,
+    channel_id: str,
+    thread_ts: str,
+    threshold: float,
+    event_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    slack_token = os.getenv("SLACK_BOT_TOKEN") or require_env("SLACK_USER_TOKEN")
+    verbose_updates = _is_truthy(os.getenv("THREAD_ENRICHMENT_VERBOSE_UPDATES"), default=False)
+    post_thread_reply_update(
+        slack_token=slack_token,
+        channel_id=channel_id,
+        thread_ts=thread_ts,
+        text=f"Received threshold `{threshold:g}` for *HeyReach*. Creating list and adding leads...",
+    )
+
+    try:
+        result = run_thread_reply_heyreach_pipeline(
+            slack_token=slack_token,
+            channel_id=channel_id,
+            thread_ts=thread_ts,
+            threshold=threshold,
+            post_updates=verbose_updates,
+        )
+    except Exception as exc:
+        _notify_thread_failure(
+            channel_id=channel_id,
+            thread_ts=thread_ts,
+            error_msg=str(exc),
+            event_id=event_id,
+        )
+        raise
+
+    if result.get("ignored") == "not_result_message_thread":
+        post_thread_reply_update(
+            slack_token=slack_token,
+            channel_id=channel_id,
+            thread_ts=thread_ts,
+            text=(
+                "Ignored: this thread is not a pipeline result message thread.\n"
+                "Reply with a threshold in a thread where the root message is the scored result."
+            ),
+        )
+        return {"ok": True, "event_id": event_id, "result": result}
+
+    lead_errors = result.get("lead_errors") or []
+    list_id = result.get("heyreach_list_id")
+    list_name = result.get("heyreach_list_name") or ""
+    source_name = result.get("source_name") or "N/A"
+    source_url = result.get("source_url") or ""
+    source_url_line = f"Source URL: {source_url}\n" if source_url else ""
+
+    if list_id:
+        summary_text = (
+            f"HeyReach enrichment complete.\n"
+            f"Source: {source_name}\n"
+            f"{source_url_line}"
+            f"JD Name: {result.get('jd_name') or 'N/A'}\n"
+            f"Threshold: {threshold:g}\n"
+            f"Rows with score+LinkedIn parsed: {result.get('rows_with_score_and_linkedin')}\n"
+            f"Candidates meeting threshold: {result.get('rows_meeting_threshold')}\n"
+            f"HeyReach list: {list_name} (id: {list_id})\n"
+            f"Leads added: {result.get('leads_added')}\n"
+            f"Leads updated: {result.get('leads_updated', 0)}\n"
+            f"Leads failed: {result.get('leads_failed', 0)}\n"
+            f"Lead add errors: {len(lead_errors)}"
+        )
+    else:
+        summary_text = (
+            f"HeyReach enrichment completed with no list created.\n"
+            f"Source: {source_name}\n"
+            f"{source_url_line}"
+            f"JD Name: {result.get('jd_name') or 'N/A'}\n"
+            f"Threshold: {threshold:g}\n"
+            f"Rows with score+LinkedIn parsed: {result.get('rows_with_score_and_linkedin')}\n"
+            f"Candidates meeting threshold: {result.get('rows_meeting_threshold')}"
+        )
+
+    summary_blocks = _build_heyreach_summary_blocks(
+        result=result,
+        threshold=threshold,
+        source_name=str(source_name),
+        source_url=str(source_url),
+        list_name=str(list_name),
+        lead_errors=lead_errors,
     )
     post_thread_reply_update(
         slack_token=slack_token,

@@ -22,6 +22,10 @@ BOUNCEBAN_BULK_DUMP_URL = "https://api.bounceban.com/v1/verify/bulk/dump"
 
 INSTANTLY_CAMPAIGN_CREATE_URL = "https://api.instantly.ai/api/v2/campaigns"
 INSTANTLY_LEAD_CREATE_URL = "https://api.instantly.ai/api/v2/leads"
+
+HEYREACH_BASE_URL = "https://api.heyreach.io/api/public"
+HEYREACH_CREATE_LIST_URL = f"{HEYREACH_BASE_URL}/list/CreateEmptyList"
+HEYREACH_ADD_LEADS_URL = f"{HEYREACH_BASE_URL}/list/AddLeadsToListV2"
 INSTANTLY_STEP_ONE_SUBJECT = "New role at a startup!"
 INSTANTLY_STEP_ONE_BODY = (
     "Hi {{firstName}},\n\n"
@@ -62,6 +66,24 @@ def parse_threshold_from_text(text: str) -> Optional[float]:
     if not match:
         return None
     return float(match.group(1))
+
+
+def parse_threshold_and_target_from_text(text: str) -> Optional[Dict[str, Any]]:
+    """Parse '<score>-instantly', '<score>-heyreach', or bare '<score>' from thread reply text.
+
+    Returns ``None`` when the text does not match any recognised format, or a dict
+    ``{"threshold": float, "target": "instantly" | "heyreach"}`` on success.
+    A bare score (no suffix) is no longer accepted — the user must specify a target.
+    """
+    if not text:
+        return None
+    match = re.fullmatch(r"\s*(10|[1-9])\s*-\s*(instantly|heyreach)\s*", text, re.IGNORECASE)
+    if not match:
+        return None
+    return {
+        "threshold": float(match.group(1)),
+        "target": match.group(2).strip().lower(),
+    }
 
 
 def _require_env(name: str) -> str:
@@ -1045,6 +1067,195 @@ def run_thread_reply_enrichment_pipeline(
         "campaign_name": campaign_name,
         "leads_added": added_count,
         "lead_skipped": lead_skipped,
+        "lead_errors": lead_errors,
+        **_result_source_fields(),
+    }
+
+
+# ---------------------------------------------------------------------------
+# HeyReach integration
+# ---------------------------------------------------------------------------
+
+
+def _heyreach_headers(api_key: str) -> Dict[str, str]:
+    return {
+        "X-API-KEY": api_key,
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    }
+
+
+def _create_heyreach_list(heyreach_api_key: str, list_name: str) -> Dict[str, Any]:
+    response = requests.post(
+        HEYREACH_CREATE_LIST_URL,
+        headers=_heyreach_headers(heyreach_api_key),
+        json={"name": list_name},
+        timeout=60,
+    )
+    response.raise_for_status()
+    body = response.json()
+    list_id = body.get("id")
+    if not list_id:
+        raise RuntimeError(f"HeyReach list creation failed: {body}")
+    return {"id": int(list_id), "name": body.get("name", list_name)}
+
+
+def _add_leads_to_heyreach_list(
+    heyreach_api_key: str,
+    list_id: int,
+    leads: List[Dict[str, str]],
+) -> Dict[str, Any]:
+    """Add up to 1000 leads to a HeyReach list in one request."""
+    heyreach_leads: List[Dict[str, Any]] = []
+    for lead in leads:
+        entry: Dict[str, Any] = {
+            "profileUrl": lead.get("linkedin_url", ""),
+            "firstName": lead.get("first_name", ""),
+            "lastName": lead.get("last_name", ""),
+            "companyName": _clean_company_name(lead.get("company_name", "")),
+        }
+        personalization = _build_heyreach_personalization(lead)
+        if personalization:
+            entry["customUserFields"] = [
+                {"name": "personalization", "value": personalization},
+            ]
+        heyreach_leads.append(entry)
+
+    response = requests.post(
+        HEYREACH_ADD_LEADS_URL,
+        headers=_heyreach_headers(heyreach_api_key),
+        json={"listId": list_id, "leads": heyreach_leads},
+        timeout=120,
+    )
+    response.raise_for_status()
+    return response.json()
+
+
+def _build_heyreach_personalization(lead: Dict[str, str]) -> str:
+    generated_email = (lead.get("generated_email") or "").strip()
+    snippet = _clean_personalization_snippet(generated_email)
+    if snippet:
+        return snippet
+    linkedin_url = lead.get("linkedin_url", "")
+    if linkedin_url:
+        return f"LinkedIn: {linkedin_url}"
+    return ""
+
+
+def _build_heyreach_list_name(*, jd_name: str, threshold: float, start_date: date) -> str:
+    clean_jd_name = (jd_name or "").strip()
+    if clean_jd_name:
+        return clean_jd_name
+    return f"JIT HeyReach Threshold {threshold:g} ({start_date.isoformat()})"
+
+
+def run_thread_reply_heyreach_pipeline(
+    *,
+    slack_token: str,
+    channel_id: str,
+    thread_ts: str,
+    threshold: float,
+    post_updates: bool = True,
+) -> Dict[str, Any]:
+    """HeyReach variant of the thread-reply pipeline.
+
+    Skips email fetch+verify (SaleSQL, Reoon, BounceBan).  Instead it creates
+    a HeyReach list and adds matching candidates directly by LinkedIn URL.
+    """
+    heyreach_api_key = _require_env("HEYREACH_API_KEY")
+
+    def _update(text: str) -> None:
+        if post_updates:
+            _slack_post_message(slack_token=slack_token, channel_id=channel_id, thread_ts=thread_ts, text=text)
+
+    root_message = _get_thread_root_message(slack_token=slack_token, channel_id=channel_id, thread_ts=thread_ts)
+    sheet_url = _extract_google_sheet_url_from_message(root_message)
+    jd_name = _extract_jd_name_from_message(root_message)
+    source_type = "google_sheet"
+    source_name = sheet_url or "unknown"
+    source_url = sheet_url if sheet_url else None
+
+    def _result_source_fields() -> Dict[str, Any]:
+        return {
+            "source_type": source_type,
+            "source_name": source_name,
+            "source_url": source_url,
+        }
+
+    if not _is_result_message_thread_root(root_message, sheet_url):
+        return {
+            "ignored": "not_result_message_thread",
+            "threshold": threshold,
+            "jd_name": jd_name,
+            "heyreach_list_id": None,
+            "heyreach_list_name": None,
+            "leads_added": 0,
+            "lead_errors": [],
+            **_result_source_fields(),
+        }
+
+    if not sheet_url:
+        raise RuntimeError("Thread root message must include a Google Sheet link.")
+    sheet_payload = load_rows_from_google_sheet_url(sheet_url)
+    source_name = (sheet_payload.get("spreadsheet_title") or source_name).strip()
+    source_url = sheet_payload.get("spreadsheet_url") or sheet_url
+    all_candidates = _load_candidates_from_rows(sheet_payload.get("rows") or [])
+
+    threshold_candidates = [c for c in all_candidates if c["score"] >= threshold]
+    threshold_candidates = [c for c in threshold_candidates if c["linkedin_url"]]
+
+    if not threshold_candidates:
+        return {
+            "threshold": threshold,
+            "jd_name": jd_name,
+            "rows_with_score_and_linkedin": len(all_candidates),
+            "rows_meeting_threshold": 0,
+            "heyreach_list_id": None,
+            "heyreach_list_name": None,
+            "leads_added": 0,
+            "lead_errors": [],
+            **_result_source_fields(),
+        }
+
+    _update(
+        f"Threshold {threshold:g} accepted {len(threshold_candidates)} candidates. "
+        "Creating HeyReach list and adding leads..."
+    )
+
+    list_name = _build_heyreach_list_name(jd_name=jd_name, threshold=threshold, start_date=date.today())
+    heyreach_list = _create_heyreach_list(heyreach_api_key=heyreach_api_key, list_name=list_name)
+    list_id = heyreach_list["id"]
+
+    # HeyReach accepts up to 1000 leads per request; batch if needed.
+    batch_size = 1000
+    total_added = 0
+    total_updated = 0
+    total_failed = 0
+    lead_errors: List[str] = []
+    for i in range(0, len(threshold_candidates), batch_size):
+        batch = threshold_candidates[i : i + batch_size]
+        try:
+            result = _add_leads_to_heyreach_list(
+                heyreach_api_key=heyreach_api_key,
+                list_id=list_id,
+                leads=batch,
+            )
+            total_added += result.get("addedLeadsCount", 0)
+            total_updated += result.get("updatedLeadsCount", 0)
+            total_failed += result.get("failedLeadsCount", 0)
+        except Exception as exc:
+            lead_errors.append(f"batch {i // batch_size}: {exc}")
+
+    return {
+        "threshold": threshold,
+        "jd_name": jd_name,
+        "rows_with_score_and_linkedin": len(all_candidates),
+        "rows_meeting_threshold": len(threshold_candidates),
+        "heyreach_list_id": list_id,
+        "heyreach_list_name": heyreach_list["name"],
+        "leads_added": total_added,
+        "leads_updated": total_updated,
+        "leads_failed": total_failed,
         "lead_errors": lead_errors,
         **_result_source_fields(),
     }

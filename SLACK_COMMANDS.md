@@ -9,7 +9,7 @@ General parsing rules:
 - Command matching is case-insensitive.
 - Header-style commands are parsed from the first line of the message.
 - `# JD` and `# JD-Quick` commands use remaining lines as JD body text.
-- Thread-reply enrichment command must be a bare integer message (`1` to `10`) with no extra text.
+- Thread-reply enrichment command must be `<score>-instantly` or `<score>-heyreach` (e.g. `8-instantly`, `7-heyreach`).
 
 ## JD Submission Commands
 
@@ -50,16 +50,28 @@ Example:
 <full JD text here...>
 ```
 
-## Thread Reply Enrichment Command
+## Thread Reply Enrichment Commands
 
-### 3) Start enrichment from scored-results thread
-- Command: bare integer `1`..`10` as thread reply text
-- Valid: `5`
-- Invalid: `score 5`, `5 please`, `5.0`
+### 3a) Instantly enrichment from scored-results thread
+- Command: `<score>-instantly` as thread reply text (e.g. `8-instantly`)
+- Valid: `8-instantly`, `5-Instantly`, ` 7 - instantly `
+- Invalid: bare `8`, `score 5`, `8-other`
 - Behavior:
   - only processed for thread replies
   - enqueues reply enrichment workflow
   - filters candidates by threshold and runs SaleSQL -> Reoon -> BounceBan -> Instantly flow
+
+### 3b) HeyReach enrichment from scored-results thread
+- Command: `<score>-heyreach` as thread reply text (e.g. `8-heyreach`)
+- Valid: `8-heyreach`, `5-HeyReach`, ` 7 - heyreach `
+- Invalid: bare `8`, `score 5`, `8-other`
+- Behavior:
+  - only processed for thread replies
+  - enqueues reply enrichment workflow
+  - filters candidates by threshold
+  - skips email fetch + verify (no SaleSQL, Reoon, BounceBan)
+  - creates a HeyReach list and adds leads directly by LinkedIn URL
+  - sends: first name, last name, company name, LinkedIn URL, personalization (custom field)
 
 ## Admin Commands (Bucket/Recovery Ops)
 
