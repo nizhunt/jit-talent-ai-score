@@ -1226,8 +1226,8 @@ def run_thread_reply_heyreach_pipeline(
     heyreach_list = _create_heyreach_list(heyreach_api_key=heyreach_api_key, list_name=list_name)
     list_id = heyreach_list["id"]
 
-    # HeyReach accepts up to 1000 leads per request; batch if needed.
-    batch_size = 1000
+    # HeyReach API accepts a maximum of 100 leads per request.
+    batch_size = 100
     total_added = 0
     total_updated = 0
     total_failed = 0

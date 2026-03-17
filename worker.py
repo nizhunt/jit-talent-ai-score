@@ -1362,6 +1362,8 @@ def _process_heyreach_enrichment(
             f"Leads failed: {result.get('leads_failed', 0)}\n"
             f"Lead add errors: {len(lead_errors)}"
         )
+        if lead_errors:
+            summary_text += "\n" + "\n".join(f"  • {e}" for e in lead_errors[:5])
     else:
         summary_text = (
             f"HeyReach enrichment completed with no list created.\n"
