@@ -1401,6 +1401,12 @@ def parse_worker_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="RQ worker for JD source/score and reply-enrichment queues")
     parser.add_argument("--burst", action="store_true", help="Exit after current queue is drained")
     parser.add_argument(
+        "--log-level",
+        choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
+        default=os.getenv("RQ_WORKER_LOG_LEVEL", "WARNING").upper(),
+        help="RQ worker logging level (default: WARNING).",
+    )
+    parser.add_argument(
         "--with-scheduler",
         action="store_true",
         help="Enable RQ scheduler. Disabled by default to reduce Redis command volume.",
@@ -1458,7 +1464,11 @@ def main() -> None:
     worker = Worker(queue_names, connection=conn)
     attach_fail_fast_exception_handler(worker)
     with_scheduler = args.with_scheduler or _is_truthy(os.getenv("RQ_WITH_SCHEDULER"), default=False)
-    worker.work(with_scheduler=with_scheduler, burst=args.burst)
+    worker.work(
+        with_scheduler=with_scheduler,
+        burst=args.burst,
+        logging_level=args.log_level,
+    )
 
 
 if __name__ == "__main__":
