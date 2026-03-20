@@ -215,3 +215,11 @@ def enqueue_jd_admin_job(payload: Dict[str, Any]):
         function_name="worker.process_jd_admin_job",
         payload=payload,
     )
+
+
+def enqueue_instantly_analytics_job():
+    return _enqueue_job(
+        queue_name=get_admin_queue_name(),
+        function_name="worker.process_instantly_analytics_job",
+        payload={},
+    )

@@ -138,6 +138,13 @@ def parse_admin_command(text: str) -> Optional[Dict[str, Any]]:
         dry_run = confirm_token != "confirm"
         return {"action": "cleanup_runs", "hours": hours, "dry_run": dry_run}
 
+    sync_analytics_match = re.match(
+        r"(?i)^#\s*jd(?:\s*-\s*|\s+)sync(?:\s*-\s*|\s+)analytics\s*$",
+        header,
+    )
+    if sync_analytics_match:
+        return {"action": "sync_instantly_analytics"}
+
     return None
 
 

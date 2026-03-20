@@ -1050,13 +1050,29 @@ def process_jd_admin_job(
                 "dry_run": False,
             }
 
+        if action == "sync_instantly_analytics":
+            _reply("Syncing Instantly campaign analytics to dashboard...")
+            from instantly_analytics import sync_instantly_analytics_to_dashboard
+
+            result = sync_instantly_analytics_to_dashboard()
+            _reply(
+                f"Analytics sync complete.\n"
+                f"- Dashboard rows with campaigns: {result.get('campaigns_with_name', 0)}\n"
+                f"- Matched in Instantly: {result.get('matched', 0)}\n"
+                f"- Updated: {result.get('updated', 0)}\n"
+                f"- Skipped (no analytics): {result.get('skipped', 0)}\n"
+                f"- Errors: {len(result.get('errors', []))}"
+            )
+            return {"ok": True, "event_id": event_id, "action": action, "result": result}
+
         _reply(
             "Unknown admin command. Supported:\n"
             "- `# JD-Runs [limit]`\n"
             "- `# JD-Run <run_id>`\n"
             "- `# JD-Retry <run_id>`\n"
             "- `# JD-Cleanup [hours]` (dry-run)\n"
-            "- `# JD-Cleanup [hours] confirm`"
+            "- `# JD-Cleanup [hours] confirm`\n"
+            "- `# JD-Sync-Analytics`"
         )
         return {"ok": False, "event_id": event_id, "error": "unknown_action", "action": action}
     except Exception as exc:
@@ -1395,6 +1411,16 @@ def _process_heyreach_enrichment(
         unfurl_media=False,
     )
     return {"ok": True, "event_id": event_id, "result": result}
+
+
+def process_instantly_analytics_job() -> Dict[str, Any]:
+    """Scheduled job: fetch Instantly campaign analytics and update the dashboard sheet."""
+    load_dotenv()
+    from instantly_analytics import sync_instantly_analytics_to_dashboard
+
+    result = sync_instantly_analytics_to_dashboard()
+    print(f"[instantly_analytics] sync complete: {result}")
+    return result
 
 
 def parse_worker_args() -> argparse.Namespace:
