@@ -274,6 +274,9 @@ async def slack_events(request: Request):
                 "target": target,
                 "event_id": event_id,
             }
+            calendly_url = parsed.get("calendly_url")
+            if calendly_url:
+                job_payload["calendly_url"] = calendly_url
         else:
             return JSONResponse({"ok": True, "ignored": "not_supported_message"})
 

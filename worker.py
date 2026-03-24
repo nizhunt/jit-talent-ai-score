@@ -1088,6 +1088,7 @@ def process_thread_reply_enrichment_job(
     threshold: float,
     target: str = "instantly",
     event_id: Optional[str] = None,
+    calendly_url: Optional[str] = None,
 ) -> Dict[str, Any]:
     load_dotenv()
     _ = reply_ts  # reserved for compatibility with existing enqueued payloads
@@ -1097,6 +1098,7 @@ def process_thread_reply_enrichment_job(
             channel_id=channel_id,
             thread_ts=thread_ts,
             threshold=threshold,
+            calendly_url=calendly_url,
             event_id=event_id,
         )
 
@@ -1302,14 +1304,16 @@ def _process_heyreach_enrichment(
     thread_ts: str,
     threshold: float,
     event_id: Optional[str] = None,
+    calendly_url: Optional[str] = None,
 ) -> Dict[str, Any]:
     slack_token = os.getenv("SLACK_BOT_TOKEN") or require_env("SLACK_USER_TOKEN")
     verbose_updates = _is_truthy(os.getenv("THREAD_ENRICHMENT_VERBOSE_UPDATES"), default=False)
+    calendly_note = f" Calendly: {calendly_url}" if calendly_url else ""
     post_thread_reply_update(
         slack_token=slack_token,
         channel_id=channel_id,
         thread_ts=thread_ts,
-        text=f"Received threshold `{threshold:g}` for *HeyReach*. Creating list and adding leads...",
+        text=f"Received threshold `{threshold:g}` for *HeyReach*. Creating list and adding leads...{calendly_note}",
     )
 
     try:
@@ -1319,6 +1323,7 @@ def _process_heyreach_enrichment(
             thread_ts=thread_ts,
             threshold=threshold,
             post_updates=verbose_updates,
+            calendly_url=calendly_url,
         )
     except Exception as exc:
         _notify_thread_failure(
@@ -1348,6 +1353,7 @@ def _process_heyreach_enrichment(
             candidate_sheet_url=str(result.get("source_url") or ""),
             heyreach_score=threshold,
             heyreach_list_id=result.get("heyreach_list_id"),
+            calendly_url=calendly_url or "",
             notes=str(result.get("note") or ""),
         )
         if not (os.getenv("DASHBOARD_GOOGLE_SHEET_URL") or "").strip():

@@ -26,6 +26,7 @@ COL_INSTANTLY_CAMPAIGN_NAME = "Instantly Campaign Name"
 COL_INSTANTLY_CAMPAIGN_URL = "Instantly Campaign URL"
 COL_HEYREACH_SCORE = "HeyReach Score"
 COL_HEYREACH_LIST_URL = "HeyReach List URL"
+COL_HEYREACH_CALENDLY_URL = "HeyReach Calendly URL"
 COL_NOTES = "Notes"
 
 SCORE_COLUMNS = {score: f"Score {score} Count" for score in range(10, -1, -1)}
@@ -49,6 +50,7 @@ DASHBOARD_COLUMNS = [
     COL_INSTANTLY_CAMPAIGN_URL,
     COL_HEYREACH_SCORE,
     COL_HEYREACH_LIST_URL,
+    COL_HEYREACH_CALENDLY_URL,
     COL_NOTES,
 ]
 
@@ -196,6 +198,7 @@ def log_heyreach_dashboard_row(
     heyreach_score: float,
     heyreach_list_id: Any = None,
     heyreach_list_url: str = "",
+    calendly_url: str = "",
     notes: str = "",
 ) -> bool:
     clean_sheet_url = (candidate_sheet_url or "").strip()
@@ -211,6 +214,7 @@ def log_heyreach_dashboard_row(
         (heyreach_list_url or "").strip()
         or _build_heyreach_list_url(heyreach_list_id)
     )
+    row[COL_HEYREACH_CALENDLY_URL] = (calendly_url or "").strip()
     row[COL_NOTES] = (notes or "").strip()
 
     return _upsert_dashboard_row(row)

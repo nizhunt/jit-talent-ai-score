@@ -74,16 +74,29 @@ def parse_threshold_and_target_from_text(text: str) -> Optional[Dict[str, Any]]:
     Returns ``None`` when the text does not match any recognised format, or a dict
     ``{"threshold": float, "target": "instantly" | "heyreach"}`` on success.
     A bare score (no suffix) is no longer accepted — the user must specify a target.
+
+    For heyreach, an optional Calendly URL may follow the command, e.g.::
+
+        8-heyreach https://calendly.com/nicole-calyptus/t007
     """
     if not text:
         return None
-    match = re.fullmatch(r"\s*(10|[1-9])\s*-\s*(instantly|heyreach)\s*", text, re.IGNORECASE)
+    match = re.fullmatch(
+        r"\s*(10|[1-9])\s*-\s*(instantly|heyreach)"
+        r"(?:\s+(https?://calendly\.com/\S+))?\s*",
+        text,
+        re.IGNORECASE,
+    )
     if not match:
         return None
-    return {
+    result: Dict[str, Any] = {
         "threshold": float(match.group(1)),
         "target": match.group(2).strip().lower(),
     }
+    calendly_url = (match.group(3) or "").strip()
+    if calendly_url:
+        result["calendly_url"] = calendly_url
+    return result
 
 
 def _require_env(name: str) -> str:
@@ -528,6 +541,10 @@ def _salesql_enrich(salesql_api_key: str, linkedin_url: str) -> Optional[Dict[st
     # Some LinkedIn profiles are simply not found by SaleSQL. Skip those entries.
     if response.status_code in {400, 404, 422}:
         return None
+    if response.status_code in {401, 403}:
+        raise RuntimeError(
+            f"SalesQL API returned {response.status_code} — API key is invalid, expired, or out of credits."
+        )
     response.raise_for_status()
     body = response.json()
     if not isinstance(body, dict):
@@ -1104,21 +1121,29 @@ def _add_leads_to_heyreach_list(
     heyreach_api_key: str,
     list_id: int,
     leads: List[Dict[str, str]],
+    calendly_url: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Add up to 1000 leads to a HeyReach list in one request."""
     heyreach_leads: List[Dict[str, Any]] = []
     for lead in leads:
+        first_name = lead.get("first_name", "")
+        last_name = lead.get("last_name", "")
         entry: Dict[str, Any] = {
             "profileUrl": lead.get("linkedin_url", ""),
-            "firstName": lead.get("first_name", ""),
-            "lastName": lead.get("last_name", ""),
+            "firstName": first_name,
+            "lastName": last_name,
             "companyName": _clean_company_name(lead.get("company_name", "")),
         }
+        custom_fields: List[Dict[str, str]] = [
+            {"name": "old_first_name", "value": first_name},
+            {"name": "old_last_name", "value": last_name},
+        ]
         personalization = _build_heyreach_personalization(lead)
         if personalization:
-            entry["customUserFields"] = [
-                {"name": "personalization", "value": personalization},
-            ]
+            custom_fields.append({"name": "personalization", "value": personalization})
+        if calendly_url:
+            custom_fields.append({"name": "Calendly", "value": calendly_url})
+        entry["customUserFields"] = custom_fields
         heyreach_leads.append(entry)
 
     response = requests.post(
@@ -1156,6 +1181,7 @@ def run_thread_reply_heyreach_pipeline(
     thread_ts: str,
     threshold: float,
     post_updates: bool = True,
+    calendly_url: Optional[str] = None,
 ) -> Dict[str, Any]:
     """HeyReach variant of the thread-reply pipeline.
 
@@ -1239,6 +1265,7 @@ def run_thread_reply_heyreach_pipeline(
                 heyreach_api_key=heyreach_api_key,
                 list_id=list_id,
                 leads=batch,
+                calendly_url=calendly_url,
             )
             total_added += result.get("addedLeadsCount", 0)
             total_updated += result.get("updatedLeadsCount", 0)
