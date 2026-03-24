@@ -532,27 +532,113 @@ def _load_candidates_from_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any
     return candidates
 
 
-def _salesql_enrich(salesql_api_key: str, linkedin_url: str) -> Optional[Dict[str, Any]]:
-    response = requests.get(
-        SALESQL_ENRICH_URL,
-        params={"linkedin_url": linkedin_url, "api_key": salesql_api_key},
-        timeout=60,
-    )
-    # Some LinkedIn profiles are simply not found by SaleSQL. Skip those entries.
-    if response.status_code in {400, 404, 422}:
-        return None
-    if response.status_code in {401, 403}:
+class _SalesQLKeyPool:
+    """Round-robin pool of SalesQL API keys with automatic failover.
+
+    Keys are tried in round-robin order so that usage is spread evenly across
+    accounts.  When a key returns 401/403 (insufficient credits or invalid),
+    it is marked as exhausted and skipped for subsequent calls.  If every key
+    is exhausted the pool raises ``RuntimeError``.
+    """
+
+    def __init__(self, api_keys: List[str]) -> None:
+        if not api_keys:
+            raise RuntimeError("No SalesQL API keys provided.")
+        self._keys: List[str] = api_keys
+        self._exhausted: set = set()
+        self._index: int = 0
+
+    def _next_key(self) -> str:
+        """Return the next usable key via round-robin, skipping exhausted ones."""
+        tried = 0
+        while tried < len(self._keys):
+            key = self._keys[self._index % len(self._keys)]
+            self._index += 1
+            if key not in self._exhausted:
+                return key
+            tried += 1
         raise RuntimeError(
-            f"SalesQL API returned {response.status_code} — API key is invalid, expired, or out of credits."
+            f"All {len(self._keys)} SalesQL API key(s) are exhausted (insufficient credits or invalid)."
         )
-    response.raise_for_status()
-    body = response.json()
-    if not isinstance(body, dict):
-        return None
-    return body
+
+    def _mark_exhausted(self, key: str) -> None:
+        self._exhausted.add(key)
+        remaining = len(self._keys) - len(self._exhausted)
+        print(f"[salesql] API key {key[:6]}…{key[-4:]} exhausted. {remaining} key(s) remaining.")
+
+    @property
+    def active_key_count(self) -> int:
+        return len(self._keys) - len(self._exhausted)
+
+    def enrich(self, linkedin_url: str) -> Optional[Dict[str, Any]]:
+        """Enrich a LinkedIn profile, rotating keys on 401/403."""
+        last_error: Optional[Exception] = None
+        attempts = 0
+        while attempts < len(self._keys):
+            try:
+                key = self._next_key()
+            except RuntimeError:
+                break
+            attempts += 1
+            response = requests.get(
+                SALESQL_ENRICH_URL,
+                params={"linkedin_url": linkedin_url, "api_key": key},
+                timeout=60,
+            )
+            # Profile not found — skip regardless of which key was used.
+            if response.status_code in {400, 404, 422}:
+                return None
+            if response.status_code in {401, 403}:
+                self._mark_exhausted(key)
+                last_error = RuntimeError(
+                    f"SalesQL API returned {response.status_code} for key {key[:6]}…{key[-4:]}."
+                )
+                continue
+            response.raise_for_status()
+            body = response.json()
+            if not isinstance(body, dict):
+                return None
+            return body
+
+        raise RuntimeError(
+            f"All {len(self._keys)} SalesQL API key(s) are exhausted (insufficient credits or invalid)."
+        ) from last_error
 
 
-def _build_email_metadata_from_salesql(candidates: List[Dict[str, Any]], salesql_api_key: str) -> Dict[str, Dict[str, str]]:
+def _load_salesql_api_keys() -> List[str]:
+    """Load SalesQL API keys from environment.
+
+    Supports two env vars (both are merged and deduplicated):
+      - SALESQL_API_KEYS  — comma-separated list (preferred)
+      - SALESQL_API_KEY   — single key (backward-compatible)
+    """
+    raw_plural = (os.getenv("SALESQL_API_KEYS") or "").strip()
+    raw_single = (os.getenv("SALESQL_API_KEY") or "").strip()
+    keys: List[str] = []
+    seen: set = set()
+    for raw in (raw_plural, raw_single):
+        for part in raw.split(","):
+            k = part.strip()
+            if k and k not in seen:
+                keys.append(k)
+                seen.add(k)
+    if not keys:
+        raise RuntimeError("Missing required env var: SALESQL_API_KEYS (or SALESQL_API_KEY)")
+    print(f"[salesql] Loaded {len(keys)} API key(s): {', '.join(k[:6] + '…' + k[-4:] for k in keys)}")
+    return keys
+
+
+def _salesql_enrich(salesql_api_key: str, linkedin_url: str) -> Optional[Dict[str, Any]]:
+    """Legacy single-key enrich (kept for backward compatibility)."""
+    pool = _SalesQLKeyPool([salesql_api_key])
+    return pool.enrich(linkedin_url)
+
+
+def _build_email_metadata_from_salesql(
+    candidates: List[Dict[str, Any]],
+    salesql_api_key: str = "",
+    salesql_key_pool: Optional[_SalesQLKeyPool] = None,
+) -> Dict[str, Dict[str, str]]:
     metadata_by_email: Dict[str, Dict[str, str]] = {}
     seen_linkedin_urls = set()
     for candidate in candidates:
@@ -560,7 +646,10 @@ def _build_email_metadata_from_salesql(candidates: List[Dict[str, Any]], salesql
         if linkedin_url in seen_linkedin_urls:
             continue
         seen_linkedin_urls.add(linkedin_url)
-        person = _salesql_enrich(salesql_api_key=salesql_api_key, linkedin_url=linkedin_url)
+        if salesql_key_pool is not None:
+            person = salesql_key_pool.enrich(linkedin_url)
+        else:
+            person = _salesql_enrich(salesql_api_key=salesql_api_key, linkedin_url=linkedin_url)
         if not person:
             continue
 
@@ -876,7 +965,7 @@ def run_thread_reply_enrichment_pipeline(
     threshold: float,
     post_updates: bool = True,
 ) -> Dict[str, Any]:
-    salesql_api_key = _require_env("SALESQL_API_KEY")
+    salesql_key_pool = _SalesQLKeyPool(_load_salesql_api_keys())
     reoon_api_key = _require_env("REOON_API_KEY")
     bounceban_api_key = _require_env("BOUNCEBAN_API_KEY")
     instantly_api_key = _require_env("INSTANTLY_API_KEY")
@@ -943,7 +1032,7 @@ def run_thread_reply_enrichment_pipeline(
 
     metadata_by_email = _build_email_metadata_from_salesql(
         candidates=threshold_candidates,
-        salesql_api_key=salesql_api_key,
+        salesql_key_pool=salesql_key_pool,
     )
     all_emails = _dedupe_preserve_order(list(metadata_by_email.keys()))
     if not all_emails:
