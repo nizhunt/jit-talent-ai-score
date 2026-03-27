@@ -893,11 +893,15 @@ def _create_instantly_campaign(instantly_api_key: str, threshold: float, jd_name
     return {"id": str(campaign_id), "name": campaign_name}
 
 
+_instantly_lead_response_logged = False
+
+
 def _add_lead_to_instantly_campaign(
     instantly_api_key: str,
     campaign_id: str,
     lead: Dict[str, str],
 ) -> Dict[str, Any]:
+    global _instantly_lead_response_logged
     linkedin_url = lead.get("linkedin_url", "")
     generated_email = (lead.get("generated_email") or "").strip()
     personalization_body = _clean_personalization_snippet(generated_email)
@@ -921,7 +925,11 @@ def _add_lead_to_instantly_campaign(
         timeout=60,
     )
     response.raise_for_status()
-    return response.json()
+    body = response.json()
+    if not _instantly_lead_response_logged:
+        print(f"[debug] Instantly lead add response (first): {body}")
+        _instantly_lead_response_logged = True
+    return body
 
 
 def _classify_instantly_lead_add_result(campaign_id: str, response_body: Dict[str, Any]) -> Dict[str, str]:

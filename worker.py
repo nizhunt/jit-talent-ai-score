@@ -1206,6 +1206,9 @@ def _process_instantly_enrichment(
         )
         if lead_skipped:
             summary_text = f"{summary_text}\nSkip sample: {lead_skipped[0]}"
+        if lead_errors:
+            error_samples = lead_errors[:3]
+            summary_text += "\nError samples:\n" + "\n".join(f"  • {e}" for e in error_samples)
     else:
         summary_text = (
             f"Thread enrichment completed with no campaign created (Instantly).\n"
