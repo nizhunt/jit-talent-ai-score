@@ -665,8 +665,20 @@ def normalize_whitespace(value: Any) -> str:
     return re.sub(r"\\s+", " ", str(value)).strip()
 
 
+_STRIP_SECTIONS_RE = re.compile(
+    r"^## (?:Activity|Recommendations)$.*?(?=^## |\Z)",
+    re.MULTILINE | re.DOTALL,
+)
+
+
+def _strip_noisy_linkedin_sections(text: str) -> str:
+    """Remove LinkedIn sections that add token cost but no scoring signal."""
+    return _STRIP_SECTIONS_RE.sub("", text)
+
+
 def truncate_candidate_text(text: str, max_chars: int = MAX_CANDIDATE_TEXT_CHARS) -> str:
-    """Limit candidate profile text size sent to the scorer model."""
+    """Strip noisy sections then limit candidate profile text size sent to the scorer model."""
+    text = _strip_noisy_linkedin_sections(text)
     if len(text) <= max_chars:
         return text
     return text[:max_chars]

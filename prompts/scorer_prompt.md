@@ -41,7 +41,7 @@ Evaluate every filter below and return `true` (mismatch) or `false` (no mismatch
 - **`language_mismatch`** — `true` when the JD explicitly requires a language (e.g. English) and the candidate's profile information is not in that language, suggesting they may not meet the language requirement.
 
 - **`seniority_band_mismatch`** — `true` when **either** of these objective conditions is met:
-  1. The JD states a years-of-experience range (e.g. "2-6 years"). The candidate's total relevant experience, summed from their LinkedIn work history, **exceeds the upper bound** of that range.
+  1. The JD states a years-of-experience range (e.g. "2-6 years"). The candidate's experience **in roles relevant to the JD's industry and function**, summed from their LinkedIn work history, **exceeds the upper bound** of that range. Count only years spent in roles whose industry or function overlaps with the JD. Unrelated prior career years (e.g. retail jobs before a finance career) do **not** count toward the cap.
   2. The JD is for an individual-contributor / specialist role and the candidate's most recent title is **Director, VP, C-level, Owner, or Partner**.
   If the JD does not state an experience range, skip condition 1 and evaluate condition 2 only.
 
@@ -58,6 +58,8 @@ Evaluate every filter below and return `true` (mismatch) or `false` (no mismatch
 - Missing only preferred or nice-to-have items should not force a low score by itself.
 
 - When a must-have cannot be confirmed or denied from the LinkedIn data, treat it as uncertain rather than missing. Uncertain must-haves do not trigger the cap but should be noted in reasoning.
+
+- **Specific tool/platform experience** (e.g. a named software product like "Black Diamond", "Salesforce", "Tamarac") should be treated as a **strong preference** — not a must-have — unless the JD explicitly marks it as non-negotiable with language like "required", "must have", or "mandatory". Do not cap scores below 4 solely for missing a specific platform name when the candidate has deep domain experience in the same function.
 
 
 
@@ -115,6 +117,18 @@ If all hard filters are false, score based on fit. Do NOT disqualify for missing
 
 - Give strongest weight to evidence from the most recent 3-5 years; older evidence is supporting only.
 
+- **Using additional LinkedIn signals (when present):**
+
+  - **Skills section:** If the profile includes a Skills list, use it as **secondary confirmation** of inferred skills. A skill appearing in both the Skills section and role history is stronger evidence than either alone. However, do not penalize for skills missing from this section — LinkedIn skills are endorsement-driven and often incomplete.
+
+  - **Certifications / Licenses:** Treat listed certifications as **confirmed domain expertise** — stronger evidence than title inference. A candidate with relevant certifications (e.g. CISSP for a security role, CFA for finance, AWS Certified for cloud) partially satisfies related JD requirements even if their titles alone do not clearly show it.
+
+  - **Education:** If the JD requires or prefers a specific educational background (e.g. "engineering background required", "finance degree preferred"), check the Education section when present. A relevant degree is supporting evidence, not a substitute for work experience. Do not penalize when education is absent from the profile — many LinkedIn users omit it.
+
+  - **Company industry tag:** LinkedIn profiles often include the employer's industry (e.g. "Computer and Network Security", "Financial Services"). Use this to **validate domain match** more objectively rather than guessing from the company name alone.
+
+  - **Company size:** When the profile shows company size (e.g. "10,001+ employees", "11-50 employees"), use it to assess enterprise vs startup experience if the JD specifies a preference. Do not penalize either way unless the JD explicitly requires it.
+
 
 
 **Seniority and leadership fit (20%):**
@@ -135,11 +149,11 @@ If all hard filters are false, score based on fit. Do NOT disqualify for missing
 
 
 
-- A thin LinkedIn profile (few roles, no descriptions, no skills section) limits confidence but is not evidence of a bad candidate.
+- A LinkedIn profile with only titles, companies, and dates is **normal** — most LinkedIn users do not write detailed role descriptions.
 
 - If the profile is too sparse to assess fit in key areas, apply a small discount (max -1 point) and note low confidence in reasoning.
 
-- Never score below 4 solely because the profile is sparse, if the visible data (titles, companies, location) suggests a plausible fit.
+- If visible signals (titles, companies, location, industry) suggest a plausible fit, **never score below 4** regardless of missing descriptions, skills sections, or endorsements. Absence of detail is not evidence against the candidate.
 
 
 
@@ -157,7 +171,9 @@ If all hard filters are false, score based on fit. Do NOT disqualify for missing
 
 - 0 = Any hard filter triggered, or invalid candidate data.
 
-- 1-2 = Missing majority of key criteria or wrong role type.
+- 1 = Completely wrong role type or industry — no meaningful overlap with the JD.
+
+- 2 = Right general area (e.g. same broad function or adjacent industry) but missing most must-haves.
 
 - 3-4 = Has some relevant experience but significant gaps.
 
