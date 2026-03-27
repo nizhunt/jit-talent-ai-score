@@ -26,6 +26,7 @@ INSTANTLY_LEAD_CREATE_URL = "https://api.instantly.ai/api/v2/leads"
 HEYREACH_BASE_URL = "https://api.heyreach.io/api/public"
 HEYREACH_CREATE_LIST_URL = f"{HEYREACH_BASE_URL}/list/CreateEmptyList"
 HEYREACH_ADD_LEADS_URL = f"{HEYREACH_BASE_URL}/list/AddLeadsToListV2"
+HEYREACH_USER_LIST_TYPE = "USER_LIST"
 INSTANTLY_STEP_ONE_SUBJECT = "New role at a startup!"
 INSTANTLY_STEP_ONE_BODY = (
     "Hi {{firstName}},\n\n"
@@ -1191,14 +1192,36 @@ def _heyreach_headers(api_key: str) -> Dict[str, str]:
     }
 
 
+def _raise_heyreach_for_status(response: requests.Response, *, action: str) -> None:
+    try:
+        response.raise_for_status()
+        return
+    except requests.HTTPError as exc:
+        detail = ""
+        try:
+            body = response.json()
+        except ValueError:
+            body = None
+        if isinstance(body, dict):
+            detail = str(body.get("errorMessage") or body.get("detail") or body.get("title") or "").strip()
+            if not detail:
+                detail = str(body).strip()
+        if not detail:
+            detail = (response.text or "").strip()
+        message = f"HeyReach {action} failed ({response.status_code})"
+        if detail:
+            message = f"{message}: {detail}"
+        raise RuntimeError(message) from exc
+
+
 def _create_heyreach_list(heyreach_api_key: str, list_name: str) -> Dict[str, Any]:
     response = requests.post(
         HEYREACH_CREATE_LIST_URL,
         headers=_heyreach_headers(heyreach_api_key),
-        json={"name": list_name},
+        json={"name": list_name, "type": HEYREACH_USER_LIST_TYPE},
         timeout=60,
     )
-    response.raise_for_status()
+    _raise_heyreach_for_status(response, action="list creation")
     body = response.json()
     list_id = body.get("id")
     if not list_id:
@@ -1241,7 +1264,7 @@ def _add_leads_to_heyreach_list(
         json={"listId": list_id, "leads": heyreach_leads},
         timeout=120,
     )
-    response.raise_for_status()
+    _raise_heyreach_for_status(response, action="lead import")
     return response.json()
 
 
