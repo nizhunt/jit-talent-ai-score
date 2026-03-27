@@ -40,11 +40,10 @@ Evaluate every filter below and return `true` (mismatch) or `false` (no mismatch
 
 - **`language_mismatch`** — `true` when the JD explicitly requires a language (e.g. English) and the candidate's profile information is not in that language, suggesting they may not meet the language requirement.
 
-- **`seniority_band_mismatch`** — `true` when the candidate is clearly in the wrong seniority band for the role. Rely mainly on **recent LinkedIn evidence**: current and most recent title, scope of responsibility, team size managed, and overall role shape. Examples of a `true` flag:
-  - JD asks for a mid-level IC and candidate is a VP / Director / C-level with no recent hands-on work.
-  - JD asks for a senior leader and candidate has only junior/mid-level experience.
-  - The gap between the JD's seniority expectation and the candidate's recent trajectory is large enough to create clear level-fit or retention risk.
-  Do **not** flag minor seniority differences (e.g. Senior vs. Staff, Manager vs. Senior Manager). Only flag clear band mismatches.
+- **`seniority_band_mismatch`** — `true` when **either** of these objective conditions is met:
+  1. The JD states a years-of-experience range (e.g. "2-6 years"). The candidate's total relevant experience, summed from their LinkedIn work history, **exceeds the upper bound** of that range.
+  2. The JD is for an individual-contributor / specialist role and the candidate's most recent title is **Director, VP, C-level, Owner, or Partner**.
+  If the JD does not state an experience range, skip condition 1 and evaluate condition 2 only.
 
 
 
