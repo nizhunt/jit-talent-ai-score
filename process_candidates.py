@@ -58,7 +58,7 @@ BASE_CSV_FIRST_COLUMNS = [
     "expansion_prompt_file",
     "widened_jd_context",
 ]
-SCORED_CSV_FIRST_COLUMNS = ["ai-score", "ai-reason", "ai-email"]
+SCORED_CSV_FIRST_COLUMNS = ["ai-score", "ai-reason", "location_mismatch", "language_mismatch", "seniority_band_mismatch", "ai-email"]
 SHEET_COLUMN_LABEL_OVERRIDES = {
     "first_name": "First Name",
     "last_name": "Last Name",
@@ -123,20 +123,29 @@ SCORE_RESPONSE_SCHEMA = {
                 "score": {
                     "type": "integer",
                     "description": "Suitability score from 0 to 10",
-                    "minimum": 0,
-                    "maximum": 10,
                 },
                 "reason": {
                     "type": "string",
                     "description": "Brief reasoning for the score",
-                    "minLength": 1,
+                },
+                "location_mismatch": {
+                    "type": "boolean",
+                    "description": "True if candidate location is incompatible with JD requirements",
+                },
+                "language_mismatch": {
+                    "type": "boolean",
+                    "description": "True if candidate does not meet JD language requirements",
+                },
+                "seniority_band_mismatch": {
+                    "type": "boolean",
+                    "description": "True if candidate is clearly in the wrong seniority band for the role",
                 },
                 "email": {
                     "type": "string",
                     "description": "Outreach email for the candidate (blank for score 0-3)",
                 },
             },
-            "required": ["score", "reason", "email"],
+            "required": ["score", "reason", "location_mismatch", "language_mismatch", "seniority_band_mismatch", "email"],
             "additionalProperties": False,
         },
     },
@@ -1238,9 +1247,10 @@ def get_ai_score(
     jd_text: str,
     scorer_prompt_template: str,
     model: str,
-) -> Tuple[Any, str, str, Dict[str, int]]:
+) -> Tuple[Any, str, str, Dict[str, bool], Dict[str, int]]:
+    empty_filters: Dict[str, bool] = {"location_mismatch": False, "language_mismatch": False, "seniority_band_mismatch": False}
     if not candidate_text or pd.isna(candidate_text):
-        return 0, "No candidate data available", "", {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+        return 0, "No candidate data available", "", empty_filters, {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
 
     capped_candidate_text = truncate_candidate_text(str(candidate_text))
     scorer_prompt = scorer_prompt_template.replace("[PASTE LINKEDIN DATA]", capped_candidate_text)
@@ -1254,7 +1264,8 @@ def get_ai_score(
                     "role": "system",
                     "content": (
                         "You are an expert recruiter. Evaluate the candidate against the "
-                        "job description. Return JSON with keys 'score', 'reason', and 'email'."
+                        "job description. Return JSON with keys 'score', 'reason', "
+                        "'location_mismatch', 'language_mismatch', 'seniority_band_mismatch', and 'email'."
                     ),
                 },
                 {"role": "user", "content": scorer_prompt},
@@ -1263,14 +1274,14 @@ def get_ai_score(
         )
         raw = (response.choices[0].message.content or "").strip()
         data = json.loads(raw)
-        score, reason, email = normalize_score_response(data)
-        return score, reason, email, extract_usage_tokens(response)
+        score, reason, email, hard_filters = normalize_score_response(data)
+        return score, reason, email, hard_filters, extract_usage_tokens(response)
     except Exception as exc:
         print(f"  [warn] scoring error: {exc}")
-        return "Error", str(exc), "", {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+        return "Error", str(exc), "", empty_filters, {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
 
 
-def normalize_score_response(payload: Dict[str, Any]) -> Tuple[int, str, str]:
+def normalize_score_response(payload: Dict[str, Any]) -> Tuple[int, str, str, Dict[str, bool]]:
     raw_score = payload.get("score")
     try:
         score = int(raw_score)
@@ -1281,6 +1292,17 @@ def normalize_score_response(payload: Dict[str, Any]) -> Tuple[int, str, str]:
     if clamped_score != score:
         print(f"[warn] model returned out-of-range score={score}; clamped to {clamped_score}")
 
+    hard_filters: Dict[str, bool] = {
+        "location_mismatch": bool(payload.get("location_mismatch", False)),
+        "language_mismatch": bool(payload.get("language_mismatch", False)),
+        "seniority_band_mismatch": bool(payload.get("seniority_band_mismatch", False)),
+    }
+
+    # Enforce score=0 if any hard filter is triggered
+    if any(hard_filters.values()) and clamped_score > 0:
+        print(f"[warn] hard filter triggered but model returned score={clamped_score}; forcing to 0")
+        clamped_score = 0
+
     reason = normalize_whitespace(payload.get("reason"))
     if not reason:
         reason = "Insufficient evidence in candidate profile to assess fit confidently."
@@ -1289,7 +1311,7 @@ def normalize_score_response(payload: Dict[str, Any]) -> Tuple[int, str, str]:
     if clamped_score <= 3:
         email = ""
 
-    return clamped_score, reason, email
+    return clamped_score, reason, email, hard_filters
 
 
 def extract_usage_tokens(response: Any) -> Dict[str, int]:
@@ -1311,7 +1333,7 @@ def score_candidates_csv(
     client: OpenAI,
     input_csv: str,
     output_csv: str,
-    jd_context_by_prompt_file: Dict[str, str],
+    original_jd_text: str,
     scorer_prompt_template: str,
     model: str,
     progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
@@ -1323,44 +1345,16 @@ def score_candidates_csv(
         df["ai-reason"] = None
     if "ai-email" not in df.columns:
         df["ai-email"] = None
+    for filter_col in ("location_mismatch", "language_mismatch", "seniority_band_mismatch"):
+        if filter_col not in df.columns:
+            df[filter_col] = None
 
     pending = df["ai-score"].isna()
     pending_count = int(pending.sum())
     scoring_workers = get_scoring_concurrent_calls()
-    print(f"Scoring {pending_count} candidates ({scoring_workers} concurrent)...")
-
-    if "expansion_prompt_file" not in df.columns:
-        raise RuntimeError(
-            "Missing required column 'expansion_prompt_file' in scoring input CSV. "
-            "Cannot select JD extension prompt for evaluation."
-        )
+    print(f"Scoring {pending_count} candidates against original JD ({scoring_workers} concurrent)...")
 
     pending_indices = [idx for idx in df.index if pending[idx]]
-    missing_prompt_file_rows = [
-        int(idx)
-        for idx in pending_indices
-        if not normalize_whitespace(df.at[idx, "expansion_prompt_file"])
-    ]
-    if missing_prompt_file_rows:
-        sample = ", ".join(str(i) for i in missing_prompt_file_rows[:10])
-        raise RuntimeError(
-            "Found rows with empty 'expansion_prompt_file' while scoring. "
-            f"Row indices (sample): {sample}"
-        )
-
-    known_prompt_files = set(jd_context_by_prompt_file.keys())
-    unknown_prompt_files = sorted(
-        {
-            normalize_whitespace(df.at[idx, "expansion_prompt_file"])
-            for idx in pending_indices
-            if normalize_whitespace(df.at[idx, "expansion_prompt_file"]) not in known_prompt_files
-        }
-    )
-    if unknown_prompt_files:
-        raise RuntimeError(
-            "No widened JD context found for expansion prompt file(s): "
-            f"{', '.join(unknown_prompt_files)}"
-        )
 
     # Fixed milestones: notify at 25%, 50%, 75% only (3 progress updates).
     milestone_pcts = [25, 50, 75]
@@ -1376,22 +1370,15 @@ def score_candidates_csv(
     lock = threading.Lock()
     completed_count = 0
 
-    def _score_one(idx: int, text: str) -> Tuple[int, Any, str, str, Dict[str, int]]:
-        prompt_file = normalize_whitespace(df.at[idx, "expansion_prompt_file"])
-        jd_context = jd_context_by_prompt_file.get(prompt_file)
-        if not jd_context:
-            raise RuntimeError(
-                "No widened JD context found while scoring row "
-                f"{idx} (expansion_prompt_file='{prompt_file}')."
-            )
-        score, reason, email, usage = get_ai_score(
+    def _score_one(idx: int, text: str) -> Tuple[int, Any, str, str, Dict[str, bool], Dict[str, int]]:
+        score, reason, email, hard_filters, usage = get_ai_score(
             client=client,
             candidate_text=text,
-            jd_text=jd_context,
+            jd_text=original_jd_text,
             scorer_prompt_template=scorer_prompt_template,
             model=model,
         )
-        return idx, score, reason, email, usage
+        return idx, score, reason, email, hard_filters, usage
 
     def _candidate_text_for_idx(idx: int) -> str:
         text = normalize_whitespace(df.at[idx, "text"]) if "text" in df.columns else ""
@@ -1422,7 +1409,7 @@ def score_candidates_csv(
             in_flight.difference_update(done)
 
             for future in done:
-                idx, score, reason, email, usage = future.result()
+                idx, score, reason, email, hard_filters, usage = future.result()
 
                 with lock:
                     usage_totals["input_tokens"] += int(usage.get("input_tokens", 0))
@@ -1432,6 +1419,9 @@ def score_candidates_csv(
                     df.at[idx, "ai-score"] = score
                     df.at[idx, "ai-reason"] = reason
                     df.at[idx, "ai-email"] = email
+                    df.at[idx, "location_mismatch"] = hard_filters.get("location_mismatch", False)
+                    df.at[idx, "language_mismatch"] = hard_filters.get("language_mismatch", False)
+                    df.at[idx, "seniority_band_mismatch"] = hard_filters.get("seniority_band_mismatch", False)
                     progress.update(1)
                     completed_count += 1
 
@@ -2160,7 +2150,6 @@ def run_score_stage_from_handoff(
     total_query_gen_usage = dict(source_stage_result.get("query_generation_usage") or {})
     if not total_query_gen_usage:
         total_query_gen_usage = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
-    jd_context_by_prompt_file = dict(source_stage_result.get("jd_context_by_prompt_file") or {})
     queries_count = int(source_stage_result.get("queries_count") or 0)
     total_exa_results = int(source_stage_result.get("total_results") or 0)
     rows_before_dedup = int(source_stage_result.get("rows_before_dedup") or 0)
@@ -2196,7 +2185,7 @@ def run_score_stage_from_handoff(
         client=client,
         input_csv=args.dedup_csv,
         output_csv=args.scored_csv,
-        jd_context_by_prompt_file=jd_context_by_prompt_file,
+        original_jd_text=original_jd_text,
         scorer_prompt_template=scorer_prompt_template,
         model=args.scorer_model,
         progress_callback=on_score_progress,

@@ -211,7 +211,7 @@ def _run_single_model(
         client=client,
         input_csv=str(dedup_csv),
         output_csv=str(scored_csv),
-        jd_context_by_prompt_file={JD_TEST_PROMPT_FILENAME: jd_text},
+        original_jd_text=jd_text,
         scorer_prompt_template=scorer_prompt_template,
         model=model,
         progress_callback=None,
