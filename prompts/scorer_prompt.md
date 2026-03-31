@@ -22,7 +22,7 @@ The candidate data comes from a **LinkedIn profile** — it may be sparse, title
 
 4. Score weighted fit only if all hard filters are false.
 
-5. Apply penalties/adjustments (recency, tenure, over-qualification, uncertainty).
+5. Apply penalties/adjustments (recency, tenure, uncertainty).
 
 6. Return a final integer score from 0 to 10.
 
@@ -40,10 +40,11 @@ Evaluate every filter below and return `true` (mismatch) or `false` (no mismatch
 
 - **`language_mismatch`** — `true` when the JD explicitly requires a language (e.g. English) and the candidate's profile information is not in that language, suggesting they may not meet the language requirement.
 
-- **`seniority_band_mismatch`** — `true` when **either** of these objective conditions is met:
+- **`seniority_band_mismatch`** — `true` when **any** of these objective conditions is met:
   1. The JD states a years-of-experience range (e.g. "2-6 years"). The candidate's experience **in roles relevant to the JD's industry and function**, summed from their LinkedIn work history, **exceeds the upper bound** of that range. Count only years spent in roles whose industry or function overlaps with the JD. Unrelated prior career years (e.g. retail jobs before a finance career) do **not** count toward the cap.
   2. The JD is for an individual-contributor / specialist role and the candidate's most recent title is **Director, VP, C-level, Owner, or Partner**.
-  If the JD does not state an experience range, skip condition 1 and evaluate condition 2 only.
+  3. **Excess total experience check:** Always calculate both the candidate's **total years of professional experience** and their **relevant years** (years in roles whose industry or function overlaps with the JD, as described in condition 1 — compute this even when the JD does not state an experience range). The allowed extra (total minus relevant) is `min(max(3, 0.6 × relevant_years), 7)`. If the actual extra exceeds this allowance, set `true`. This catches career-changers whose total experience far outweighs their relevant experience, indicating likely salary-expectation mismatch. If relevant years cannot be determined from the profile, skip this condition.
+  If the JD does not state an experience range, skip condition 1 and evaluate conditions 2 and 3 only.
 
 
 
@@ -77,11 +78,11 @@ Evaluate every filter below and return `true` (mismatch) or `false` (no mismatch
 
 **SCORING GUIDELINES (0-10):**
 
-If all hard filters are false, score based on fit. Do NOT disqualify for missing specific keywords if the candidate's role history implies the skill.
+If all hard filters are false, score based on fit. Do NOT disqualify for missing specific keywords if the candidate's role history implies the skill. Use the weighted categories below as a guide, then round your composite assessment to the nearest integer on the 0-10 scale. When in doubt between two adjacent scores, use the calibration table at the end to choose.
 
 
 
-**Career trajectory and experience (35%):**
+**Career trajectory and experience (40%):**
 
 
 
@@ -89,21 +90,17 @@ If all hard filters are false, score based on fit. Do NOT disqualify for missing
 
 - Award partial credit for adjacent domains when the underlying problems/responsibilities are clearly transferable.
 
-- **Over-qualification:** if candidate has far more seniority than required, apply the -5 penalty only when mismatch is likely to create level-fit or retention risk. Do not auto-penalize only because years are high.
-
 - **Job tenure patterns:**
 
   - Count role changes **per company**, not total role entries. Multiple titles at the same company are likely promotions, not job-hopping.
 
   - If the candidate has moved across 4+ **different companies** in 6 years with no clear pattern of consulting/contracting, internal transfers, acquisitions, or startup shutdowns, deduct up to 3 points.
 
-  - 10+ years at a single non-startup company indicates adaptability risk, deduct up to 3 points.
-
-- **CV gaps:** Only penalize when dates **positively show** a gap of 2+ years (e.g. one role ends 2019, next starts 2022). Do not penalize when dates are simply absent, year-only, or the profile is incomplete — that is normal for LinkedIn.
+- **CV gaps:** Only penalize when dates **positively show** a gap of 2+ years (e.g. one role ends 2019, next starts 2022). Absent or year-only dates are not evidence of a gap.
 
 
 
-**Role and domain fit (30%):**
+**Role and domain fit (35%):**
 
 
 
@@ -117,21 +114,11 @@ If all hard filters are false, score based on fit. Do NOT disqualify for missing
 
 - Give strongest weight to evidence from the most recent 3-5 years; older evidence is supporting only.
 
-- **Using additional LinkedIn signals (when present):**
-
-  - **Skills section:** If the profile includes a Skills list, use it as **secondary confirmation** of inferred skills. A skill appearing in both the Skills section and role history is stronger evidence than either alone. However, do not penalize for skills missing from this section — LinkedIn skills are endorsement-driven and often incomplete.
-
-  - **Certifications / Licenses:** Treat listed certifications as **confirmed domain expertise** — stronger evidence than title inference. A candidate with relevant certifications (e.g. CISSP for a security role, CFA for finance, AWS Certified for cloud) partially satisfies related JD requirements even if their titles alone do not clearly show it.
-
-  - **Education:** If the JD requires or prefers a specific educational background (e.g. "engineering background required", "finance degree preferred"), check the Education section when present. A relevant degree is supporting evidence, not a substitute for work experience. Do not penalize when education is absent from the profile — many LinkedIn users omit it.
-
-  - **Company industry tag:** LinkedIn profiles often include the employer's industry (e.g. "Computer and Network Security", "Financial Services"). Use this to **validate domain match** more objectively rather than guessing from the company name alone.
-
-  - **Company size:** When the profile shows company size (e.g. "10,001+ employees", "11-50 employees"), use it to assess enterprise vs startup experience if the JD specifies a preference. Do not penalize either way unless the JD explicitly requires it.
+- **Additional LinkedIn signals:** When present, use Skills, Certifications, Education, Company industry tags, and Company size as supporting evidence to confirm or strengthen inferences from job titles and role history. Certifications are stronger evidence than title inference alone. Do not penalize for any of these fields being absent — they are often incomplete on LinkedIn.
 
 
 
-**Seniority and leadership fit (20%):**
+**Seniority and leadership fit (25%):**
 
 
 
@@ -142,26 +129,6 @@ If all hard filters are false, score based on fit. Do NOT disqualify for missing
 - For leadership roles, leadership experience is a positive.
 
 - Match level to what the JD actually requires using scope (team size, ownership, decision authority), not title alone.
-
-
-
-**Profile completeness (10%):**
-
-
-
-- A LinkedIn profile with only titles, companies, and dates is **normal** — most LinkedIn users do not write detailed role descriptions.
-
-- If the profile is too sparse to assess fit in key areas, apply a small discount (max -1 point) and note low confidence in reasoning.
-
-- If visible signals (titles, companies, location, industry) suggest a plausible fit, **never score below 4** regardless of missing descriptions, skills sections, or endorsements. Absence of detail is not evidence against the candidate.
-
-
-
-**Logistics (5%):**
-
-
-
-- Remote/hybrid preference alignment.
 
 
 

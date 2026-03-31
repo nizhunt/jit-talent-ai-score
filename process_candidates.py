@@ -73,7 +73,6 @@ SHEET_COLUMN_LABEL_OVERRIDES = {
     "id": "ID",
 }
 MAX_WORK_HISTORY_COLUMNS = 15
-MAX_CANDIDATE_TEXT_CHARS = 30_000
 SHEET_COLUMNS_TO_OMIT = {
     "id",
     "entity_id",
@@ -676,12 +675,6 @@ def _strip_noisy_linkedin_sections(text: str) -> str:
     return _STRIP_SECTIONS_RE.sub("", text)
 
 
-def truncate_candidate_text(text: str, max_chars: int = MAX_CANDIDATE_TEXT_CHARS) -> str:
-    """Strip noisy sections then limit candidate profile text size sent to the scorer model."""
-    text = _strip_noisy_linkedin_sections(text)
-    if len(text) <= max_chars:
-        return text
-    return text[:max_chars]
 
 
 def normalize_url(value: Any) -> str:
@@ -1259,13 +1252,19 @@ def get_ai_score(
     jd_text: str,
     scorer_prompt_template: str,
     model: str,
-) -> Tuple[Any, str, str, Dict[str, bool], Dict[str, int]]:
+) -> Tuple[int, str, str, Dict[str, bool], Dict[str, int]]:
     empty_filters: Dict[str, bool] = {"location_mismatch": False, "language_mismatch": False, "seniority_band_mismatch": False}
+    empty_usage: Dict[str, int] = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
     if not candidate_text or pd.isna(candidate_text):
-        return 0, "No candidate data available", "", empty_filters, {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+        return 0, "No candidate data available", "", empty_filters, empty_usage
+    if not jd_text or not str(jd_text).strip():
+        return 0, "No job description provided for scoring", "", empty_filters, empty_usage
 
-    capped_candidate_text = truncate_candidate_text(str(candidate_text))
-    scorer_prompt = scorer_prompt_template.replace("[PASTE LINKEDIN DATA]", capped_candidate_text)
+    if "[PASTE LINKEDIN DATA]" not in scorer_prompt_template or "[PASTE JD TEXT]" not in scorer_prompt_template:
+        raise ValueError("Scorer prompt template is missing required placeholders: [PASTE LINKEDIN DATA] and/or [PASTE JD TEXT]")
+
+    cleaned_candidate_text = _strip_noisy_linkedin_sections(str(candidate_text))
+    scorer_prompt = scorer_prompt_template.replace("[PASTE LINKEDIN DATA]", cleaned_candidate_text)
     scorer_prompt = scorer_prompt.replace("[PASTE JD TEXT]", jd_text)
 
     try:
@@ -1276,8 +1275,13 @@ def get_ai_score(
                     "role": "system",
                     "content": (
                         "You are an expert recruiter. Evaluate the candidate against the "
-                        "job description. Return JSON with keys 'score', 'reason', "
-                        "'location_mismatch', 'language_mismatch', 'seniority_band_mismatch', and 'email'."
+                        "job description following the detailed instructions exactly. "
+                        "CRITICAL RULES: "
+                        "1) Evaluate ALL hard filters first — if ANY is true, score MUST be 0. "
+                        "2) Hard filter booleans must be true or false (not strings). "
+                        "3) Reason must be exactly 4 sentences. "
+                        "4) Email must be exactly 2 sentences separated by one blank line (scores 4-10) or empty (scores 0-3). "
+                        "5) Score must be an integer 0-10."
                     ),
                 },
                 {"role": "user", "content": scorer_prompt},
@@ -1290,7 +1294,7 @@ def get_ai_score(
         return score, reason, email, hard_filters, extract_usage_tokens(response)
     except Exception as exc:
         print(f"  [warn] scoring error: {exc}")
-        return "Error", str(exc), "", empty_filters, {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+        return -1, f"Scoring error: {exc}", "", empty_filters, empty_usage
 
 
 def normalize_score_response(payload: Dict[str, Any]) -> Tuple[int, str, str, Dict[str, bool]]:
@@ -1305,9 +1309,9 @@ def normalize_score_response(payload: Dict[str, Any]) -> Tuple[int, str, str, Di
         print(f"[warn] model returned out-of-range score={score}; clamped to {clamped_score}")
 
     hard_filters: Dict[str, bool] = {
-        "location_mismatch": bool(payload.get("location_mismatch", False)),
-        "language_mismatch": bool(payload.get("language_mismatch", False)),
-        "seniority_band_mismatch": bool(payload.get("seniority_band_mismatch", False)),
+        "location_mismatch": payload.get("location_mismatch") is True,
+        "language_mismatch": payload.get("language_mismatch") is True,
+        "seniority_band_mismatch": payload.get("seniority_band_mismatch") is True,
     }
 
     # Enforce score=0 if any hard filter is triggered
@@ -1317,11 +1321,21 @@ def normalize_score_response(payload: Dict[str, Any]) -> Tuple[int, str, str, Di
 
     reason = normalize_whitespace(payload.get("reason"))
     if not reason:
-        reason = "Insufficient evidence in candidate profile to assess fit confidently."
+        reason = (
+            "Candidate profile did not provide sufficient evidence to assess fit."
+            " Key qualifications could not be verified from available data."
+            " Relevant experience and domain alignment remain uncertain."
+            " Recommend manual review if the candidate appears promising by other signals."
+        )
 
     email = str(payload.get("email") or "").strip()
     if clamped_score <= 3:
         email = ""
+    elif email:
+        # Validate email has the expected 2-paragraph structure; warn if not
+        paragraphs = [p.strip() for p in email.split("\n\n") if p.strip()]
+        if len(paragraphs) != 2:
+            print(f"[warn] email field has {len(paragraphs)} paragraph(s) instead of expected 2")
 
     return clamped_score, reason, email, hard_filters
 
@@ -1885,7 +1899,12 @@ def count_qualified_finds(scored_df: pd.DataFrame, minimum_score: float = 5.0) -
     if "ai-score" not in scored_df.columns:
         return 0
     numeric_scores = pd.to_numeric(scored_df["ai-score"], errors="coerce")
-    return int((numeric_scores >= minimum_score).sum())
+    qualified = numeric_scores >= minimum_score
+    # Exclude candidates with any hard filter triggered (defensive — score should already be 0)
+    for hf_col in ("location_mismatch", "language_mismatch", "seniority_band_mismatch"):
+        if hf_col in scored_df.columns:
+            qualified = qualified & ~scored_df[hf_col].astype(bool).fillna(False)
+    return int(qualified.sum())
 
 
 def format_eta_seconds(eta_seconds: float) -> str:
