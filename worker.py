@@ -985,6 +985,15 @@ def process_jd_admin_job(
                 )
                 return {"ok": False, "event_id": event_id, "error": "missing_handoff_artifacts", "run_id": run_id}
 
+            # Remove the idempotency marker so the rescore posts a fresh Slack summary
+            summary_marker_key = artifact_keys["final_summary_posted"]
+            if bucket.exists(summary_marker_key):
+                try:
+                    bucket.delete(summary_marker_key)
+                    print(f"[pipeline] run_id={run_id} deleted summary marker for rescore")
+                except Exception as exc:
+                    print(f"[warn] run_id={run_id} failed to delete summary marker: {exc}")
+
             payload = {
                 "run_id": run_id,
                 "channel_id": str(meta.get("channel_id") or channel_id),

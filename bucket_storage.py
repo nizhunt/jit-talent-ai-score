@@ -320,6 +320,16 @@ class S3BucketClient:
                 return False
             raise
 
+    def delete(self, key: str) -> None:
+        """Delete a single object by key."""
+        object_key = self._full_key(key)
+        self._run_with_retries(
+            "delete",
+            object_key,
+            lambda: self._client.delete_object(Bucket=self.config.bucket_name, Key=object_key),
+        )
+        print(f"[bucket] deleted key={object_key}")
+
     def list_keys(self, prefix: str) -> list[str]:
         full_prefix = self._full_key(prefix).rstrip("/") + "/"
         keys: list[str] = []
