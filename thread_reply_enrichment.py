@@ -29,28 +29,22 @@ HEYREACH_ADD_LEADS_URL = f"{HEYREACH_BASE_URL}/list/AddLeadsToListV2"
 HEYREACH_USER_LIST_TYPE = "USER_LIST"
 INSTANTLY_STEP_ONE_SUBJECT = "New role at a startup!"
 INSTANTLY_STEP_ONE_BODY = (
-    "Hi {{firstName}},\n\n"
-    "{{personalization}}\n\n"
-    "Do you have a few minutes this week? Great to share more\n"
-    "Best,\n"
-    "Dan\n"
-    "CEO and Co-founder, Calyptus"
+    "<p>Hi {{firstName}},</p>"
+    "<p>{{personalization}}</p>"
+    "<p>Do you have a few minutes this week? Great to share more</p>"
+    "<p>Best,<br>Dan<br>CEO and Co-founder, Calyptus</p>"
 )
 INSTANTLY_STEP_TWO_BODY = (
-    "Following up here as the team are moving fast, and you have a fantastic profile.\n"
-    "Would you be open to chat?\n\n"
-    "Love to connect you with Dianmarie, our senior recruiter who is leading the process!\n\n"
-    "Best,\n"
-    "Dan\n"
-    "CEO and Co-founder, Calyptus"
+    "<p>Following up here as the team are moving fast, and you have a fantastic profile.</p>"
+    "<p>Would you be open to chat?</p>"
+    "<p>Love to connect you with Dianmarie, our senior recruiter who is leading the process!</p>"
+    "<p>Best,<br>Dan<br>CEO and Co-founder, Calyptus</p>"
 )
 INSTANTLY_STEP_THREE_BODY = (
-    "Following up here as the team are moving fast, and you have a fantastic profile.\n\n"
-    "Would you be open to chat?\n\n"
-    "Love to connect you with Dianmarie, our senior recruiter who is leading the process!\n\n"
-    "Best,\n"
-    "Dan\n"
-    "CEO and Co-founder, Calyptus"
+    "<p>Hi {{firstName}},</p>"
+    "<p>Just wanted to follow up one last time. Would love to connect you with our team on this role.</p>"
+    "<p>Let me know if you have a few minutes this week!</p>"
+    "<p>Best,<br>Dan<br>CEO and Co-founder, Calyptus</p>"
 )
 
 RESULT_MESSAGE_PREFIX_DEFAULT = "AI-scored candidates sheet for this JD"
@@ -830,9 +824,6 @@ def _build_instantly_campaign_name(*, jd_name: str, threshold: float, start_date
 
 
 def _create_instantly_campaign(instantly_api_key: str, threshold: float, jd_name: str = "") -> Dict[str, str]:
-    timezone = os.getenv("INSTANTLY_CAMPAIGN_TIMEZONE", "Asia/Kolkata")
-    start_hour = os.getenv("INSTANTLY_CAMPAIGN_START_HOUR", "08:00")
-    end_hour = os.getenv("INSTANTLY_CAMPAIGN_END_HOUR", "18:00")
     duration_days = int(os.getenv("INSTANTLY_CAMPAIGN_DURATION_DAYS", "30"))
 
     start_date = date.today()
@@ -846,11 +837,17 @@ def _create_instantly_campaign(instantly_api_key: str, threshold: float, jd_name
             "end_date": end_date.isoformat(),
             "schedules": [
                 {
-                    "name": "Default",
-                    "days": {"0": True, "1": True, "2": True, "3": True, "4": True, "5": False, "6": False},
-                    "timing": {"from": start_hour, "to": end_hour},
-                    "timezone": timezone,
-                }
+                    "name": "Morning",
+                    "days": {"0": True, "1": True, "2": True, "3": True, "4": True, "5": True, "6": True},
+                    "timing": {"from": "08:00", "to": "10:00"},
+                    "timezone": "America/Chicago",
+                },
+                {
+                    "name": "Evening",
+                    "days": {"0": True, "1": True, "2": True, "3": True, "4": True, "5": True, "6": True},
+                    "timing": {"from": "16:30", "to": "20:00"},
+                    "timezone": "America/Chicago",
+                },
             ],
         },
         "sequences": [
@@ -866,13 +863,13 @@ def _create_instantly_campaign(instantly_api_key: str, threshold: float, jd_name
                         "type": "email",
                         "delay": 2,
                         "delay_unit": "days",
-                        "variants": [{"subject": INSTANTLY_STEP_ONE_SUBJECT, "body": INSTANTLY_STEP_TWO_BODY}],
+                        "variants": [{"subject": "", "body": INSTANTLY_STEP_TWO_BODY}],
                     },
                     {
                         "type": "email",
-                        "delay": 0,
+                        "delay": 2,
                         "delay_unit": "days",
-                        "variants": [{"subject": INSTANTLY_STEP_ONE_SUBJECT, "body": INSTANTLY_STEP_THREE_BODY}],
+                        "variants": [{"subject": "", "body": INSTANTLY_STEP_THREE_BODY}],
                     }
                 ]
             }
