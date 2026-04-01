@@ -803,6 +803,8 @@ def process_jd_score_job(
                 total_profiles_found=int(result.get("rows_before_dedup") or 0),
                 profiles_after_dedup=int(result.get("rows_after_dedup") or 0),
                 score_counts_by_score=result.get("score_counts_by_score") or {},
+                discarded_incomplete_profile=int(result.get("discarded_incomplete_profile") or 0),
+                discarded_low_followers=int(result.get("discarded_low_followers") or 0),
             )
         except Exception as dashboard_exc:
             print(f"[warn] dashboard JD logging failed: {dashboard_exc}")

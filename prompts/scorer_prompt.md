@@ -64,6 +64,14 @@ Evaluate every filter below and return `true` (mismatch) or `false` (no mismatch
 
 
 
+**DATA COMPLETENESS CHECK:**
+
+- If the candidate profile contains fewer than 150 words of substantive content (excluding section headers), treat data as insufficient. Cap score at 4 regardless of how well the title appears to match.
+- If the profile has an Experience section but contains zero role descriptions (only titles and dates, no bullets or text under any role), deduct 2 points from the final score.
+- "Uncertain" is not "favorable" — when most JD requirements are uncertain due to thin data, score conservatively (lean toward the lower end of the plausible range, not the middle or upper).
+
+
+
 **JOB RECENCY CHECK:**
 
 

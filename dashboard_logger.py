@@ -14,6 +14,8 @@ COL_JD_CAMPAIGN_NAME = "JD Campaign Name"
 COL_SCORED_SHEET_URL = "Scored Candidates Sheet URL"
 COL_TOTAL_PROFILES_FOUND = "Total Profiles Found"
 COL_PROFILES_AFTER_DEDUP = "Profiles After Deduplication"
+COL_DISCARDED_INCOMPLETE_PROFILE = "Discarded Incomplete Profile"
+COL_DISCARDED_LOW_FOLLOWERS = "Discarded Low Followers"
 COL_LOCATION_MISMATCH_MANUAL = "Location Mismatch (Manual Review)"
 COL_MINIMUM_SCORE_FOR_CONTACT = "Minimum Score for Contact"
 COL_CANDIDATES_ENTERED_ENRICHMENT = "Candidates Entered Enrichment"
@@ -37,6 +39,8 @@ DASHBOARD_COLUMNS = [
     COL_SCORED_SHEET_URL,
     COL_TOTAL_PROFILES_FOUND,
     COL_PROFILES_AFTER_DEDUP,
+    COL_DISCARDED_INCOMPLETE_PROFILE,
+    COL_DISCARDED_LOW_FOLLOWERS,
     COL_LOCATION_MISMATCH_MANUAL,
     *SCORE_COLUMNS.values(),
     COL_MINIMUM_SCORE_FOR_CONTACT,
@@ -133,6 +137,8 @@ def log_jd_processing_dashboard_row(
     total_profiles_found: int,
     profiles_after_dedup: int,
     score_counts_by_score: Optional[Dict[Any, Any]] = None,
+    discarded_incomplete_profile: int = 0,
+    discarded_low_followers: int = 0,
 ) -> bool:
     clean_sheet_url = (candidate_sheet_url or "").strip()
     if not clean_sheet_url:
@@ -145,6 +151,8 @@ def log_jd_processing_dashboard_row(
     row[COL_SCORED_SHEET_URL] = clean_sheet_url
     row[COL_TOTAL_PROFILES_FOUND] = _safe_int(total_profiles_found)
     row[COL_PROFILES_AFTER_DEDUP] = _safe_int(profiles_after_dedup)
+    row[COL_DISCARDED_INCOMPLETE_PROFILE] = _safe_int(discarded_incomplete_profile)
+    row[COL_DISCARDED_LOW_FOLLOWERS] = _safe_int(discarded_low_followers)
     for score, column in SCORE_COLUMNS.items():
         row[column] = score_counts.get(score, 0)
 

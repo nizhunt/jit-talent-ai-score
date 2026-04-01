@@ -1018,8 +1018,6 @@ def flatten_exa_results_to_rows(
             ).strip(" |")
 
         text = normalize_whitespace(item.get("text"))
-        if not text:
-            text = highlights_text
 
         explicit_first_name = pick_first_non_empty(item, ["firstName", "first_name", "given_name"])
         explicit_last_name = pick_first_non_empty(item, ["lastName", "last_name", "family_name"])
@@ -1246,6 +1244,92 @@ def deduplicate_csv(input_csv: str, output_csv: str) -> pd.DataFrame:
     return dedup_df
 
 
+# ---------------------------------------------------------------------------
+# Quality filters – applied after dedup, before scoring
+# ---------------------------------------------------------------------------
+
+_FOLLOWERS_RE = re.compile(r"([\d,]+)\s+followers")
+_EXPERIENCE_SUBHEADING_RE = re.compile(r"^### .+ at .+", re.MULTILINE)
+
+MIN_FOLLOWERS_THRESHOLD = 50
+
+
+def _profile_has_proper_experience(text: str) -> bool:
+    """Return True if profile text has an ## Experience section with at least one ### subheading."""
+    if "## Experience" not in text:
+        return False
+    exp_start = text.index("## Experience")
+    text_after_exp = text[exp_start:]
+    return bool(_EXPERIENCE_SUBHEADING_RE.search(text_after_exp))
+
+
+def _parse_follower_count(text: str) -> Optional[int]:
+    """Extract follower count from the 'N connections • M followers' line. Returns None if not found."""
+    m = _FOLLOWERS_RE.search(text)
+    if not m:
+        return None
+    return int(m.group(1).replace(",", ""))
+
+
+def filter_low_quality_profiles(
+    input_csv: str,
+    output_csv: str,
+) -> Dict[str, Any]:
+    """Filter out profiles with incomplete extraction or very low followers.
+
+    Returns dict with keys:
+        rows_before_filter, rows_after_filter,
+        discarded_incomplete_profile, discarded_low_followers
+    """
+    df = pd.read_csv(input_csv)
+    if df.empty:
+        df.to_csv(output_csv, index=False)
+        return {
+            "rows_before_filter": 0,
+            "rows_after_filter": 0,
+            "discarded_incomplete_profile": 0,
+            "discarded_low_followers": 0,
+        }
+
+    rows_before = len(df)
+    text_series = df["text"].fillna("") if "text" in df.columns else pd.Series([""] * len(df))
+
+    # 1. Incomplete profile: no ## Experience section or no ### subheading under it
+    incomplete_mask = ~text_series.apply(_profile_has_proper_experience)
+
+    # 2. Low followers: fewer than MIN_FOLLOWERS_THRESHOLD
+    follower_counts = text_series.apply(_parse_follower_count)
+    low_followers_mask = follower_counts.apply(
+        lambda c: c is not None and c < MIN_FOLLOWERS_THRESHOLD
+    )
+
+    # Don't double-count: a profile can be discarded for only one reason (prioritize incomplete)
+    discard_incomplete = incomplete_mask
+    discard_low_followers = low_followers_mask & ~incomplete_mask
+    discard_any = discard_incomplete | discard_low_followers
+
+    discarded_incomplete_count = int(discard_incomplete.sum())
+    discarded_low_followers_count = int(discard_low_followers.sum())
+
+    filtered_df = df[~discard_any].copy()
+    filtered_df.to_csv(output_csv, index=False)
+
+    print(
+        f"  Quality filter: {rows_before} -> {len(filtered_df)} rows "
+        f"(discarded {discarded_incomplete_count} incomplete profiles, "
+        f"{discarded_low_followers_count} low-follower profiles)"
+    )
+
+    del df
+    gc.collect()
+    return {
+        "rows_before_filter": rows_before,
+        "rows_after_filter": len(filtered_df),
+        "discarded_incomplete_profile": discarded_incomplete_count,
+        "discarded_low_followers": discarded_low_followers_count,
+    }
+
+
 def get_ai_score(
     client: OpenAI,
     candidate_text: str,
@@ -1407,10 +1491,7 @@ def score_candidates_csv(
         return idx, score, reason, email, hard_filters, usage
 
     def _candidate_text_for_idx(idx: int) -> str:
-        text = normalize_whitespace(df.at[idx, "text"]) if "text" in df.columns else ""
-        if not text and "highlights" in df.columns:
-            text = normalize_whitespace(df.at[idx, "highlights"])
-        return text
+        return normalize_whitespace(df.at[idx, "text"]) if "text" in df.columns else ""
 
     with ThreadPoolExecutor(max_workers=scoring_workers) as executor:
         pending_iter = iter(pending_indices)
@@ -1826,22 +1907,38 @@ def build_scored_result_blocks(
     elapsed_text: str,
     score_tally_lines: List[str],
     linkedin_sample_groups: List[Tuple[int, List[Dict[str, str]]]],
+    discarded_incomplete_profile: int = 0,
+    discarded_low_followers: int = 0,
 ) -> List[Dict[str, Any]]:
     title_text = _slack_escape(normalize_whitespace(result_prefix) or "AI-scored candidates sheet for this JD")
     jd_display = _slack_escape(normalize_whitespace(jd_name) or "N/A")
     cost_display = _slack_escape(cost_per_find_line.replace("Est. cost/find (score >= 5):", "").strip())
 
+    quality_discard_total = discarded_incomplete_profile + discarded_low_followers
+    summary_fields = [
+        {"type": "mrkdwn", "text": f"*JD Name*\n{jd_display}"},
+        {"type": "mrkdwn", "text": f"*Scored*\n{rows_scored}"},
+        {"type": "mrkdwn", "text": f"*Finds (score >= 5)*\n{qualified_finds}"},
+        {"type": "mrkdwn", "text": f"*Total time*\n{_slack_escape(elapsed_text)}"},
+        {"type": "mrkdwn", "text": f"*Est. cost/find (score >= 5)*\n{cost_display}"},
+    ]
+    if quality_discard_total > 0:
+        summary_fields.append(
+            {
+                "type": "mrkdwn",
+                "text": (
+                    f"*Quality filter discards*\n{quality_discard_total} "
+                    f"(incomplete: {discarded_incomplete_profile}, "
+                    f"low followers: {discarded_low_followers})"
+                ),
+            }
+        )
+
     blocks: List[Dict[str, Any]] = [
         {"type": "section", "text": {"type": "mrkdwn", "text": f"*{title_text}*"}},
         {
             "type": "section",
-            "fields": [
-                {"type": "mrkdwn", "text": f"*JD Name*\n{jd_display}"},
-                {"type": "mrkdwn", "text": f"*Scored*\n{rows_scored}"},
-                {"type": "mrkdwn", "text": f"*Finds (score >= 5)*\n{qualified_finds}"},
-                {"type": "mrkdwn", "text": f"*Total time*\n{_slack_escape(elapsed_text)}"},
-                {"type": "mrkdwn", "text": f"*Est. cost/find (score >= 5)*\n{cost_display}"},
-            ],
+            "fields": summary_fields,
         },
         {
             "type": "section",
@@ -2140,8 +2237,15 @@ def run_source_stage_from_jd_text(
     debug_pause(args.debug, "dedup")
     dedup_df = deduplicate_csv(args.candidates_csv, args.dedup_csv)
     rows_after_dedup = len(dedup_df)
-    del dedup_df  # Free before scoring reads the dedup CSV from disk
+    del dedup_df  # Free before quality filter reads the dedup CSV from disk
     gc.collect()
+
+    # Quality filter: discard incomplete profiles and low-follower profiles
+    quality_filter_result = filter_low_quality_profiles(
+        input_csv=args.dedup_csv,
+        output_csv=args.dedup_csv,  # overwrite in-place
+    )
+    rows_after_quality_filter = quality_filter_result["rows_after_filter"]
 
     maybe_stop(args.stop_after, "dedup")
 
@@ -2154,6 +2258,9 @@ def run_source_stage_from_jd_text(
         "total_results": total_exa_results,
         "rows_before_dedup": rows_before_dedup,
         "rows_after_dedup": rows_after_dedup,
+        "rows_after_quality_filter": rows_after_quality_filter,
+        "discarded_incomplete_profile": quality_filter_result["discarded_incomplete_profile"],
+        "discarded_low_followers": quality_filter_result["discarded_low_followers"],
         "query_generation_usage": dict(total_query_gen_usage),
         "jd_context_by_prompt_file": dict(jd_context_by_prompt_file),
     }
@@ -2185,6 +2292,8 @@ def run_score_stage_from_handoff(
     total_exa_results = int(source_stage_result.get("total_results") or 0)
     rows_before_dedup = int(source_stage_result.get("rows_before_dedup") or 0)
     rows_after_dedup = int(source_stage_result.get("rows_after_dedup") or 0)
+    discarded_incomplete_profile = int(source_stage_result.get("discarded_incomplete_profile") or 0)
+    discarded_low_followers = int(source_stage_result.get("discarded_low_followers") or 0)
 
     sheet_title = build_sheet_title(jd_name=jd_name, scored_csv_path=args.scored_csv)
     google_sheet = create_google_sheet_placeholder(
@@ -2285,12 +2394,22 @@ def run_score_stage_from_handoff(
     result_prefix = normalize_whitespace(os.getenv("RESULT_MESSAGE_PREFIX", "AI-scored candidates sheet for this JD"))
     prefix_line = f"{result_prefix}\n" if result_prefix else ""
 
+    quality_discard_total = discarded_incomplete_profile + discarded_low_followers
+    quality_filter_line = ""
+    if quality_discard_total > 0:
+        quality_filter_line = (
+            f"Quality filter discards: {quality_discard_total} "
+            f"(incomplete profile: {discarded_incomplete_profile}, "
+            f"low followers: {discarded_low_followers})\n"
+        )
+
     result_message_text = (
         f"{prefix_line}"
         f"{jd_name_line}"
         f"Google Sheet: {google_sheet_url}\n"
         f"Scored: {rows_scored}\n"
         f"Finds (score >= 5): {qualified_finds}\n"
+        f"{quality_filter_line}"
         f"{cost_per_find_line}"
         f"Total time: {format_eta_seconds(elapsed)}\n\n"
         f"Score Tally:\n{tally_block}\n\n"
@@ -2307,6 +2426,8 @@ def run_score_stage_from_handoff(
         elapsed_text=format_eta_seconds(elapsed),
         score_tally_lines=score_tally_lines,
         linkedin_sample_groups=linkedin_sample_groups,
+        discarded_incomplete_profile=discarded_incomplete_profile,
+        discarded_low_followers=discarded_low_followers,
     )
     if post_final_message:
         post_slack_message(
@@ -2325,6 +2446,8 @@ def run_score_stage_from_handoff(
         "total_results": total_exa_results,
         "rows_before_dedup": rows_before_dedup,
         "rows_after_dedup": rows_after_dedup,
+        "discarded_incomplete_profile": discarded_incomplete_profile,
+        "discarded_low_followers": discarded_low_followers,
         "rows_scored": rows_scored,
         "uploaded_file_id": None,
         "google_sheet_id": google_sheet.get("spreadsheet_id"),
