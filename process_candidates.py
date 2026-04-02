@@ -111,6 +111,17 @@ QUERY_RESPONSE_SCHEMA = {
     },
 }
 
+JD_EMAIL_RULES = """Email rules:
+
+output 2 plain-text sentences separated by exactly 1 blank line.
+
+Sentence 1: a short candidate fit sentence starting with "I came across your profile and think you could be a great match for {{role}} at/in {{location and work mode details}}" Example: "I came across your profile and think you could be a great match for a Head of Engineering in an in-office role in the Greater Toronto Area."
+
+Sentence 2: one very short sentence describing what the role does and 2 skills needed for the job using JD responsibilities.
+
+Do not add labels, bullets, numbering, or markdown."""
+
+
 SCORE_RESPONSE_SCHEMA = {
     "type": "json_schema",
     "json_schema": {
@@ -139,12 +150,8 @@ SCORE_RESPONSE_SCHEMA = {
                     "type": "boolean",
                     "description": "True if candidate is clearly in the wrong seniority band for the role",
                 },
-                "email": {
-                    "type": "string",
-                    "description": "Outreach email for the candidate (blank for score 0-3)",
-                },
             },
-            "required": ["score", "reason", "location_mismatch", "language_mismatch", "seniority_band_mismatch", "email"],
+            "required": ["score", "reason", "location_mismatch", "language_mismatch", "seniority_band_mismatch"],
             "additionalProperties": False,
         },
     },
@@ -1336,13 +1343,13 @@ def get_ai_score(
     jd_text: str,
     scorer_prompt_template: str,
     model: str,
-) -> Tuple[int, str, str, Dict[str, bool], Dict[str, int]]:
+) -> Tuple[int, str, Dict[str, bool], Dict[str, int]]:
     empty_filters: Dict[str, bool] = {"location_mismatch": False, "language_mismatch": False, "seniority_band_mismatch": False}
     empty_usage: Dict[str, int] = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
     if not candidate_text or pd.isna(candidate_text):
-        return 0, "No candidate data available", "", empty_filters, empty_usage
+        return 0, "No candidate data available", empty_filters, empty_usage
     if not jd_text or not str(jd_text).strip():
-        return 0, "No job description provided for scoring", "", empty_filters, empty_usage
+        return 0, "No job description provided for scoring", empty_filters, empty_usage
 
     if "[PASTE LINKEDIN DATA]" not in scorer_prompt_template or "[PASTE JD TEXT]" not in scorer_prompt_template:
         raise ValueError("Scorer prompt template is missing required placeholders: [PASTE LINKEDIN DATA] and/or [PASTE JD TEXT]")
@@ -1364,8 +1371,7 @@ def get_ai_score(
                         "1) Evaluate ALL hard filters first — if ANY is true, score MUST be 0. "
                         "2) Hard filter booleans must be true or false (not strings). "
                         "3) Reason must be exactly 4 sentences. "
-                        "4) Email must be exactly 2 sentences separated by one blank line (scores 4-10) or empty (scores 0-3). "
-                        "5) Score must be an integer 0-10."
+                        "4) Score must be an integer 0-10."
                     ),
                 },
                 {"role": "user", "content": scorer_prompt},
@@ -1374,14 +1380,14 @@ def get_ai_score(
         )
         raw = (response.choices[0].message.content or "").strip()
         data = json.loads(raw)
-        score, reason, email, hard_filters = normalize_score_response(data)
-        return score, reason, email, hard_filters, extract_usage_tokens(response)
+        score, reason, hard_filters = normalize_score_response(data)
+        return score, reason, hard_filters, extract_usage_tokens(response)
     except Exception as exc:
         print(f"  [warn] scoring error: {exc}")
-        return -1, f"Scoring error: {exc}", "", empty_filters, empty_usage
+        return -1, f"Scoring error: {exc}", empty_filters, empty_usage
 
 
-def normalize_score_response(payload: Dict[str, Any]) -> Tuple[int, str, str, Dict[str, bool]]:
+def normalize_score_response(payload: Dict[str, Any]) -> Tuple[int, str, Dict[str, bool]]:
     raw_score = payload.get("score")
     try:
         score = int(raw_score)
@@ -1412,16 +1418,60 @@ def normalize_score_response(payload: Dict[str, Any]) -> Tuple[int, str, str, Di
             " Recommend manual review if the candidate appears promising by other signals."
         )
 
-    email = str(payload.get("email") or "").strip()
-    if clamped_score <= 3:
-        email = ""
-    elif email:
-        # Validate email has the expected 2-paragraph structure; warn if not
-        paragraphs = [p.strip() for p in email.split("\n\n") if p.strip()]
-        if len(paragraphs) != 2:
-            print(f"[warn] email field has {len(paragraphs)} paragraph(s) instead of expected 2")
+    return clamped_score, reason, hard_filters
 
-    return clamped_score, reason, email, hard_filters
+
+def _normalize_jd_email_output(content: str) -> str:
+    normalized = (content or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+    if not normalized:
+        raise RuntimeError("JD email generation returned empty output.")
+
+    paragraphs = [part.strip() for part in re.split(r"\n\s*\n", normalized) if part.strip()]
+    if len(paragraphs) == 1:
+        non_empty_lines = [line.strip() for line in normalized.split("\n") if line.strip()]
+        if len(non_empty_lines) == 2:
+            paragraphs = non_empty_lines
+
+    if len(paragraphs) != 2:
+        raise RuntimeError(
+            "JD email generation did not return exactly 2 sentences separated by one blank line."
+        )
+
+    for paragraph in paragraphs:
+        if re.match(r"^(?:[-*#]|\d+\.)\s*", paragraph):
+            raise RuntimeError("JD email generation returned labeled or markdown-style output.")
+
+    return f"{paragraphs[0]}\n\n{paragraphs[1]}"
+
+
+def generate_jd_email_snippet(
+    client: OpenAI,
+    jd_text: str,
+    model: str,
+) -> Tuple[str, Dict[str, int]]:
+    cleaned_jd_text = (jd_text or "").strip()
+    if not cleaned_jd_text:
+        raise RuntimeError("Cannot generate JD email snippet without the original JD text.")
+
+    response = client.chat.completions.create(
+        model=model,
+        messages=[
+            {
+                "role": "system",
+                "content": (
+                    "You write concise recruiter outreach snippets. "
+                    "Follow the requested output format exactly and return plain text only."
+                ),
+            },
+            {
+                "role": "user",
+                "content": f"Original JD:\n{cleaned_jd_text}\n\n{JD_EMAIL_RULES}",
+            },
+        ],
+        max_completion_tokens=1200,
+    )
+    raw = (response.choices[0].message.content or "").strip()
+    return _normalize_jd_email_output(raw), extract_usage_tokens(response)
 
 
 def extract_usage_tokens(response: Any) -> Dict[str, int]:
@@ -1446,6 +1496,7 @@ def score_candidates_csv(
     original_jd_text: str,
     scorer_prompt_template: str,
     model: str,
+    generated_email: Optional[str] = None,
     progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
 ) -> Tuple[pd.DataFrame, Dict[str, int]]:
     df = read_pipeline_csv(input_csv)
@@ -1455,6 +1506,8 @@ def score_candidates_csv(
         df["ai-reason"] = None
     if "ai-email" not in df.columns:
         df["ai-email"] = None
+    if generated_email is not None:
+        df["ai-email"] = str(generated_email).strip()
     for filter_col in ("location_mismatch", "language_mismatch", "seniority_band_mismatch"):
         if filter_col not in df.columns:
             df[filter_col] = None
@@ -1480,15 +1533,15 @@ def score_candidates_csv(
     lock = threading.Lock()
     completed_count = 0
 
-    def _score_one(idx: int, text: str) -> Tuple[int, Any, str, str, Dict[str, bool], Dict[str, int]]:
-        score, reason, email, hard_filters, usage = get_ai_score(
+    def _score_one(idx: int, text: str) -> Tuple[int, Any, str, Dict[str, bool], Dict[str, int]]:
+        score, reason, hard_filters, usage = get_ai_score(
             client=client,
             candidate_text=text,
             jd_text=original_jd_text,
             scorer_prompt_template=scorer_prompt_template,
             model=model,
         )
-        return idx, score, reason, email, hard_filters, usage
+        return idx, score, reason, hard_filters, usage
 
     def _candidate_text_for_idx(idx: int) -> str:
         return normalize_whitespace(df.at[idx, "text"]) if "text" in df.columns else ""
@@ -1516,7 +1569,7 @@ def score_candidates_csv(
             in_flight.difference_update(done)
 
             for future in done:
-                idx, score, reason, email, hard_filters, usage = future.result()
+                idx, score, reason, hard_filters, usage = future.result()
 
                 with lock:
                     usage_totals["input_tokens"] += int(usage.get("input_tokens", 0))
@@ -1525,7 +1578,6 @@ def score_candidates_csv(
 
                     df.at[idx, "ai-score"] = score
                     df.at[idx, "ai-reason"] = reason
-                    df.at[idx, "ai-email"] = email
                     df.at[idx, "location_mismatch"] = hard_filters.get("location_mismatch", False)
                     df.at[idx, "language_mismatch"] = hard_filters.get("language_mismatch", False)
                     df.at[idx, "seniority_band_mismatch"] = hard_filters.get("seniority_band_mismatch", False)
@@ -2288,6 +2340,11 @@ def run_score_stage_from_handoff(
     total_query_gen_usage = dict(source_stage_result.get("query_generation_usage") or {})
     if not total_query_gen_usage:
         total_query_gen_usage = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+    generated_email, email_generation_usage = generate_jd_email_snippet(
+        client=client,
+        jd_text=original_jd_text,
+        model=args.scorer_model,
+    )
     queries_count = int(source_stage_result.get("queries_count") or 0)
     total_exa_results = int(source_stage_result.get("total_results") or 0)
     rows_before_dedup = int(source_stage_result.get("rows_before_dedup") or 0)
@@ -2328,6 +2385,7 @@ def run_score_stage_from_handoff(
         original_jd_text=original_jd_text,
         scorer_prompt_template=scorer_prompt_template,
         model=args.scorer_model,
+        generated_email=generated_email,
         progress_callback=on_score_progress,
     )
 
@@ -2354,8 +2412,16 @@ def run_score_stage_from_handoff(
     del scored_df
     gc.collect()
 
-    total_input_tokens = int(total_query_gen_usage.get("input_tokens", 0)) + int(scoring_usage.get("input_tokens", 0))
-    total_output_tokens = int(total_query_gen_usage.get("output_tokens", 0)) + int(scoring_usage.get("output_tokens", 0))
+    total_input_tokens = (
+        int(total_query_gen_usage.get("input_tokens", 0))
+        + int(email_generation_usage.get("input_tokens", 0))
+        + int(scoring_usage.get("input_tokens", 0))
+    )
+    total_output_tokens = (
+        int(total_query_gen_usage.get("output_tokens", 0))
+        + int(email_generation_usage.get("output_tokens", 0))
+        + int(scoring_usage.get("output_tokens", 0))
+    )
     used_assumptions = False
     if total_input_tokens == 0 and total_output_tokens == 0:
         used_assumptions = True
@@ -2454,6 +2520,7 @@ def run_score_stage_from_handoff(
         "google_sheet_url": google_sheet_url,
         "google_sheet_title": google_sheet.get("spreadsheet_title"),
         "sheet_ready_csv": sheet_ready_csv,
+        "generated_email": generated_email,
         "queries_log_path": None,
         "cost_summary": cost_summary,
         "score_counts_by_score": score_counts_by_score,

@@ -20,6 +20,7 @@ from process_candidates import (
     JD_TEST_PROMPT_FILENAME,
     deduplicate_csv,
     flatten_exa_results_to_rows,
+    generate_jd_email_snippet,
     normalize_url,
     read_text_file,
     run_exa_fanout,
@@ -114,11 +115,8 @@ def _format_metrics(df: pd.DataFrame) -> Dict[str, Any]:
     is_numeric = score_ints.notna()
     in_range = score_ints.apply(lambda x: x is not None and 0 <= x <= 10)
 
-    low_scores = score_ints.apply(lambda x: x is not None and 0 <= x <= 3)
-    high_scores = score_ints.apply(lambda x: x is not None and 4 <= x <= 10)
-
-    email_blank = emails.fillna("").astype(str).str.strip().eq("")
-    email_non_blank = ~email_blank
+    email_non_blank = emails.fillna("").astype(str).str.strip().ne("")
+    email_unique_non_blank = int(emails.fillna("").astype(str).str.strip().replace("", pd.NA).dropna().nunique())
 
     reason_sentence_counts = reasons.fillna("").astype(str).apply(_sentence_count)
     reason_4_sentences = reason_sentence_counts.eq(4)
@@ -140,34 +138,13 @@ def _format_metrics(df: pd.DataFrame) -> Dict[str, Any]:
         "score_in_range_pct": pct(in_range),
         "reason_exact_4_sentences_rows": int(reason_4_sentences.sum()),
         "reason_exact_4_sentences_pct": pct(reason_4_sentences),
-        "email_blank_when_score_0_3_rows": int((low_scores & email_blank).sum()),
-        "email_blank_when_score_0_3_expected_rows": int(low_scores.sum()),
-        "email_blank_when_score_0_3_pct": (
-            round(float((low_scores & email_blank).sum()) * 100.0 / float(low_scores.sum()), 2)
-            if int(low_scores.sum()) > 0
-            else 100.0
-        ),
-        "email_present_when_score_4_10_rows": int((high_scores & email_non_blank).sum()),
-        "email_present_when_score_4_10_expected_rows": int(high_scores.sum()),
-        "email_present_when_score_4_10_pct": (
-            round(float((high_scores & email_non_blank).sum()) * 100.0 / float(high_scores.sum()), 2)
-            if int(high_scores.sum()) > 0
-            else 100.0
-        ),
-        "email_two_paragraph_format_rows": int((high_scores & email_two_sentence_format).sum()),
-        "email_two_paragraph_format_expected_rows": int(high_scores.sum()),
-        "email_two_paragraph_format_pct": (
-            round(float((high_scores & email_two_sentence_format).sum()) * 100.0 / float(high_scores.sum()), 2)
-            if int(high_scores.sum()) > 0
-            else 100.0
-        ),
-        "email_plain_text_rows": int((high_scores & email_plain_text).sum()),
-        "email_plain_text_expected_rows": int(high_scores.sum()),
-        "email_plain_text_pct": (
-            round(float((high_scores & email_plain_text).sum()) * 100.0 / float(high_scores.sum()), 2)
-            if int(high_scores.sum()) > 0
-            else 100.0
-        ),
+        "email_non_blank_rows": int(email_non_blank.sum()),
+        "email_non_blank_pct": pct(email_non_blank),
+        "email_unique_non_blank_values": email_unique_non_blank,
+        "email_two_paragraph_format_rows": int(email_two_sentence_format.sum()),
+        "email_two_paragraph_format_pct": pct(email_two_sentence_format),
+        "email_plain_text_rows": int(email_plain_text.sum()),
+        "email_plain_text_pct": pct(email_plain_text),
     }
 
 
@@ -206,6 +183,11 @@ def _run_single_model(
 
     pd.DataFrame(rows).to_csv(candidates_csv, index=False)
     dedup_df = deduplicate_csv(str(candidates_csv), str(dedup_csv))
+    generated_email, email_usage = generate_jd_email_snippet(
+        client=client,
+        jd_text=jd_text,
+        model=model,
+    )
 
     scored_df, usage = score_candidates_csv(
         client=client,
@@ -214,6 +196,7 @@ def _run_single_model(
         original_jd_text=jd_text,
         scorer_prompt_template=scorer_prompt_template,
         model=model,
+        generated_email=generated_email,
         progress_callback=None,
     )
 
@@ -223,9 +206,9 @@ def _run_single_model(
         "rows_flattened": int(len(rows)),
         "rows_after_dedup": int(len(dedup_df)),
         "rows_scored": int(len(scored_df)),
-        "usage_input_tokens": int(usage.get("input_tokens", 0)),
-        "usage_output_tokens": int(usage.get("output_tokens", 0)),
-        "usage_total_tokens": int(usage.get("total_tokens", 0)),
+        "usage_input_tokens": int(email_usage.get("input_tokens", 0)) + int(usage.get("input_tokens", 0)),
+        "usage_output_tokens": int(email_usage.get("output_tokens", 0)) + int(usage.get("output_tokens", 0)),
+        "usage_total_tokens": int(email_usage.get("total_tokens", 0)) + int(usage.get("total_tokens", 0)),
     }
     metrics.update(_format_metrics(scored_df))
     return scored_df, metrics
