@@ -39,6 +39,7 @@ DEFAULT_EXA_MAX_QPS = 2.0
 DEFAULT_EXA_SEARCH_MAX_ATTEMPTS = 4
 DEFAULT_EXA_RETRY_BASE_DELAY_SECONDS = 2.0
 MAX_EXA_RETRY_DELAY_SECONDS = 20.0
+DEFAULT_EXA_SEARCH_TYPE = "deep-reasoning"
 DEFAULT_SCORING_CONCURRENT_CALLS = 24
 DEFAULT_SCORING_INFLIGHT_FACTOR = 2
 JD_TEST_MAX_RESULTS = 100
@@ -251,6 +252,11 @@ def get_exa_concurrent_searches() -> int:
 
 def get_exa_max_qps() -> float:
     return _safe_env_float("EXA_MAX_QPS", DEFAULT_EXA_MAX_QPS)
+
+
+def get_exa_search_type() -> str:
+    raw = normalize_whitespace(os.getenv("EXA_SEARCH_TYPE"))
+    return raw or DEFAULT_EXA_SEARCH_TYPE
 
 
 def get_scoring_concurrent_calls() -> int:
@@ -544,6 +550,7 @@ def exa_search_one(
         _safe_env_float("EXA_RETRY_BASE_DELAY_SECONDS", DEFAULT_EXA_RETRY_BASE_DELAY_SECONDS),
     )
     last_error: Optional[Exception] = None
+    search_type = get_exa_search_type()
 
     for attempt in range(1, max_attempts + 1):
         try:
@@ -553,7 +560,7 @@ def exa_search_one(
                 query,
                 category="people",
                 num_results=num_results,
-                type="deep",
+                type=search_type,
                 contents={
                     "text": {
                         "verbosity": "full",

@@ -1,5 +1,5 @@
 openai
-exa-py
+exa-py==2.10.2
 pandas
 python-dotenv
 requests
